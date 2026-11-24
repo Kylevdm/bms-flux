@@ -3,9 +3,10 @@
 import argparse
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 
 import aiomqtt
+from aiohttp import web
 from pydantic import ValidationError
 
 from bms_flux import addon
@@ -49,7 +50,7 @@ async def run() -> None:
     clock = SystemClock()
     transport = await SerialTransport.open(settings.bus)
     try:
-        await Bridge(
+        bridge = Bridge(
             transport,
             SeplosV3Decoder(),
             ReconnectingSink(connect, clock),
@@ -63,7 +64,15 @@ async def run() -> None:
             state_dir=settings.state_dir,
             stream=settings.stream,
             raw_frames=settings.raw_frames,
-        ).run()
+            api_token=settings.api_token.get_secret_value(),
+        )
+        async with AsyncExitStack() as stack:
+            if bridge.api is not None:
+                runner = web.AppRunner(bridge.api.app, access_log=None)
+                await runner.setup()
+                stack.push_async_callback(runner.cleanup)
+                await web.TCPSite(runner, "0.0.0.0", settings.api_port).start()
+            await bridge.run()
     finally:
         transport.close()
 
