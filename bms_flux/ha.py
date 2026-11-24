@@ -175,18 +175,25 @@ class SnapshotPublisher:
         )
 
     async def sync_links(self) -> None:
-        for serial, link in self._identity.links.items():
-            if self._links.get(serial) == link:
-                continue
-            self._links[serial] = link
-            await self._sink.publish(f"bms_flux/{serial}/link", link, retain=True)
-            await self._sink.publish(
-                f"bms_flux/{serial}/availability",
-                "online" if link == "ok" else "offline",
-                retain=True,
-            )
-            if link == "ok":
-                await self._publish(serial)
+        # Publishing awaits, and time moves on meanwhile: re-expire and repeat until the
+        # published link states match identity, so a stall can't leave a stale "ok" behind.
+        changed = True
+        while changed:
+            changed = False
+            self._identity.expire(self._clock.now())
+            for serial, link in list(self._identity.links.items()):
+                if self._links.get(serial) == link:
+                    continue
+                changed = True
+                self._links[serial] = link
+                await self._sink.publish(f"bms_flux/{serial}/link", link, retain=True)
+                await self._sink.publish(
+                    f"bms_flux/{serial}/availability",
+                    "online" if link == "ok" else "offline",
+                    retain=True,
+                )
+                if link == "ok":
+                    await self._publish(serial)
 
     async def consume(self, stream: ReadingStream) -> None:
         while True:
@@ -211,6 +218,10 @@ class SnapshotPublisher:
             stream.task_done()
 
     async def _publish(self, serial: str) -> None:
+        # Freshness is rechecked here, after any awaits that led to this publish.
+        self._identity.expire(self._clock.now())
+        if self._identity.links[serial] != "ok":
+            return
         await self._sink.publish(f"bms_flux/{serial}/state", json.dumps(self._latest[serial]))
         self._deadlines[serial] = self._clock.now() + self._snapshot_interval_s
 

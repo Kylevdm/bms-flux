@@ -240,3 +240,35 @@ async def test_unmapped_addresses_are_reported_but_never_become_packs(configured
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+class StallingMQTT(MemoryMQTT):
+    """A sink whose recovery availability publish stalls past silent_after."""
+
+    def __init__(self, clock: ManualClock) -> None:
+        super().__init__()
+        self._clock = clock
+
+    async def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
+        if topic.endswith("/availability") and payload == "online":
+            self._clock.advance(11)
+        await super().publish(topic, payload, retain=retain)
+
+
+@pytest.mark.asyncio
+async def test_recovery_snapshot_is_not_published_once_blocks_expire_mid_publish() -> None:
+    packs = [Pack(address=1, serial="PACK")]
+    transport, clock = FakeTransport(), ManualClock()
+    sink = StallingMQTT(clock)
+    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(), sink, packs, clock).run())
+    try:
+        await settle()
+        transport.chunks.put_nowait(full_set())
+        await settle()
+        assert not payloads(sink, "bms_flux/PACK/state")
+        assert payloads(sink, "bms_flux/PACK/link")[-1] == "silent"
+        assert payloads(sink, "bms_flux/PACK/availability")[-1] == "offline"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
