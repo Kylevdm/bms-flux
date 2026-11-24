@@ -25,7 +25,7 @@ async def test_probe_lists_unmapped_addresses_with_cycles_and_reported_soc(
         assert bus == "/dev/test"
         return transport
 
-    monkeypatch.setattr("bms_flux.cli.SerialTransport.open", open_transport)
+    monkeypatch.setattr("bms_flux.transport.SerialTransport.open", open_transport)
     task = asyncio.create_task(probe("/dev/test", 10, clock=clock))
     await settle()
     broken = bytearray(pia(address=3))

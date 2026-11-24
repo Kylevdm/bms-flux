@@ -24,6 +24,7 @@ async def test_run_sets_retained_offline_lwt_and_publishes_online(
         state_dir=tmp_path,
     )
     messages: list[tuple[str, str, bool]] = []
+    online = asyncio.Event()
 
     class Client:
         async def subscribe(self, topic_filter: str) -> None:
@@ -56,6 +57,8 @@ async def test_run_sets_retained_offline_lwt_and_publishes_online(
             self, topic: str, payload: str, *, retain: bool = False, qos: int = 0
         ) -> None:
             messages.append((topic, payload, retain))
+            if topic == "bms_flux/status" and payload == "online":
+                online.set()
 
     class Transport(FakeTransport):
         def close(self) -> None:
@@ -72,13 +75,19 @@ async def test_run_sets_retained_offline_lwt_and_publishes_online(
     async def open_transport(bus: str) -> Transport:
         assert bus == "/dev/test"
         transport = Transport()
-        transport.chunks.put_nowait(b"")
         return transport
 
     monkeypatch.setattr("bms_flux.cli.load_settings", lambda: settings)
     monkeypatch.setattr("bms_flux.cli.aiomqtt.Client", client)
-    monkeypatch.setattr("bms_flux.cli.SerialTransport.open", open_transport)
-    await run()
+    monkeypatch.setattr("bms_flux.transport.SerialTransport.open", open_transport)
+    task = asyncio.create_task(run())
+    try:
+        async with asyncio.timeout(3):
+            await online.wait()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     assert ("bms_flux/status", "online", True) in messages
     assert ("bms_flux/PACK/availability", "offline", True) in messages
 

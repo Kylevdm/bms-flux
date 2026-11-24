@@ -1,7 +1,8 @@
-"""Run the bms-flux serial-to-MQTT bridge from the console script."""
+"""Run the bms-flux read-only bus-to-MQTT bridge from the console script."""
 
 import argparse
 import asyncio
+import logging
 from contextlib import suppress
 
 import aiomqtt
@@ -13,7 +14,7 @@ from bms_flux.clock import Clock, SystemClock
 from bms_flux.mqtt import BrokerSink
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import load_settings
-from bms_flux.transport import SerialTransport
+from bms_flux.transport import SupervisedTransport
 
 
 class ConfigurationError(Exception):
@@ -40,14 +41,15 @@ async def run() -> None:
         password=mqtt.password.get_secret_value() if mqtt.password else None,
         will=aiomqtt.Will("bms_flux/status", "offline", retain=True),
     ) as client:
-        transport = await SerialTransport.open(settings.bus)
+        clock = SystemClock()
+        transport = SupervisedTransport(settings.bus, clock)
         try:
             await Bridge(
                 transport,
                 SeplosV3Decoder(),
                 BrokerSink(client),
                 settings.packs,
-                SystemClock(),
+                clock,
                 snapshot_interval_s=settings.snapshot_interval_s,
                 silent_after_s=settings.silent_after_s,
                 drift_full_charge=settings.drift_full_charge,
@@ -56,15 +58,17 @@ async def run() -> None:
                 state_dir=settings.state_dir,
                 stream=settings.stream,
                 raw_frames=settings.raw_frames,
+                bus_state=lambda: transport.state,
             ).run()
         finally:
             transport.close()
 
 
 async def probe(bus: str, seconds: int = 10, *, clock: Clock | None = None) -> None:
-    transport = await SerialTransport.open(bus)
+    clock = clock or SystemClock()
+    transport = SupervisedTransport(bus, clock)
     try:
-        heard = await probe_blocks(transport, SeplosV3Decoder(), clock or SystemClock(), seconds)
+        heard = await probe_blocks(transport, SeplosV3Decoder(), clock, seconds)
         for address, block in sorted(heard.items()):
             cycles = block.fields.get("cycles", "unknown")
             soc = block.fields.get("reported_soc")
@@ -75,6 +79,7 @@ async def probe(bus: str, seconds: int = 10, *, clock: Clock | None = None) -> N
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(prog="bms-flux")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("run")

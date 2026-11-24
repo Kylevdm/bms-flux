@@ -244,8 +244,6 @@ async def test_raw_probe_chunks_publish_both_packs_with_probe_values() -> None:
                 assert snapshot["reported_soc"] == expected["reported_soc"]
                 assert snapshot["cycles"] == expected["cycles"]
                 assert snapshot["full_capacity"] == 280.0
-        transport.chunks.put_nowait(b"")
-        await task
     finally:
         if not task.done():
             task.cancel()
