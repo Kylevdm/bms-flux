@@ -3,6 +3,7 @@
 import asyncio
 import json
 import struct
+from typing import Any
 
 
 class ManualClock:
@@ -35,10 +36,14 @@ class FakeTransport:
 
 class MemoryMQTT:
     def __init__(self) -> None:
-        self.messages: list[tuple[str, dict[str, object], bool]] = []
+        self.messages: list[tuple[str, Any, bool]] = []
 
     async def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
-        self.messages.append((topic, json.loads(payload), retain))
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            decoded = payload
+        self.messages.append((topic, decoded, retain))
 
 
 def frame(address: int = 1, *, current: int = -1259) -> bytes:
@@ -54,6 +59,11 @@ def block(function: int, payload: bytes, address: int = 1) -> bytes:
         for _ in range(8):
             crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
     return data + crc.to_bytes(2, "little")
+
+
+def discard_snapshots(sink: MemoryMQTT) -> None:
+    """Discard startup recovery snapshots before asserting later publications."""
+    sink.messages[:] = [message for message in sink.messages if not message[0].endswith("/state")]
 
 
 async def settle() -> None:

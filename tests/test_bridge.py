@@ -9,20 +9,31 @@ import pytest
 from bms_flux.bridge import Bridge
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import MQTTSettings, Pack, Settings
-from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, frame, settle
+from tests.helpers import (
+    FakeTransport,
+    ManualClock,
+    MemoryMQTT,
+    block,
+    discard_snapshots,
+    frame,
+    settle,
+)
 
 
 @pytest.mark.asyncio
 async def test_pia_becomes_retained_discovery_and_ten_second_snapshot() -> None:
     packs = [Pack(address=1, serial="SP112B2410100228")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    bridge = Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock)
+    bridge = Bridge(transport, SeplosV3Decoder(), sink, packs, clock, silent_after_s=120)
     task = asyncio.create_task(bridge.run())
     try:
         await settle()
         transport.chunks.put_nowait(frame())
         await settle()
         assert not [m for m in sink.messages if m[0].endswith("/state")]
+        transport.chunks.put_nowait(block(4, bytes(52)) + block(1, bytes(18)))
+        await settle()
+        discard_snapshots(sink)
         clock.advance(10)
         await settle()
         snapshots = [m for m in sink.messages if m[0].endswith("/state")]
@@ -79,18 +90,20 @@ async def test_configured_snapshot_interval_and_urgent_timer_restart(tmp_path: P
     task = asyncio.create_task(
         Bridge(
             transport,
-            SeplosV3Decoder(settings.packs),
+            SeplosV3Decoder(),
             sink,
             settings.packs,
             clock,
             snapshot_interval_s=settings.snapshot_interval_s,
+            silent_after_s=120,
         ).run()
     )
     try:
         await settle()
         transport.chunks.put_nowait(frame())
-        transport.chunks.put_nowait(block(1, bytes(18)))
+        transport.chunks.put_nowait(block(4, bytes(52)) + block(1, bytes(18)))
         await settle()
+        discard_snapshots(sink)
         clock.advance(5)
         await settle()
         assert not [t for t, _, _ in sink.messages if t.endswith("/state")]
@@ -122,7 +135,9 @@ async def test_configured_snapshot_interval_and_urgent_timer_restart(tmp_path: P
 async def test_bad_crc_and_incomplete_junk_resync_without_publishing_unmapped_packs() -> None:
     packs = [Pack(address=1, serial="SP112B2410100228")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(
+        Bridge(transport, SeplosV3Decoder(), sink, packs, clock, silent_after_s=120).run()
+    )
     try:
         await settle()
         broken = bytearray(frame(current=300))
@@ -137,7 +152,9 @@ async def test_bad_crc_and_incomplete_junk_resync_without_publishing_unmapped_pa
         transport.chunks.put_nowait(b"\x01\x04\xfa" + frame(current=425)[:7])
         await settle()
         transport.chunks.put_nowait(frame(current=425)[7:])
+        transport.chunks.put_nowait(block(4, bytes(52)) + block(1, bytes(18)))
         await settle()
+        discard_snapshots(sink)
         clock.advance(10)
         await settle()
         snapshots = [m for m in sink.messages if m[0].endswith("/state")]
@@ -160,10 +177,17 @@ async def test_raw_probe_chunks_publish_both_packs_with_probe_values() -> None:
         Pack(address=2, serial="SP18B2311040070"),
     ]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(
+        Bridge(transport, SeplosV3Decoder(), sink, packs, clock, silent_after_s=120).run()
+    )
     raw = await asyncio.to_thread(Path("probe/fixtures/sniff-19200.raw.jsonl").read_text)
     chunks = [json.loads(line) for line in raw.splitlines()]
     try:
+        await settle()
+        for pack in packs:
+            transport.chunks.put_nowait(
+                block(4, bytes(52), pack.address) + block(1, bytes(18), pack.address)
+            )
         await settle()
         previous = float(chunks[0]["t"])
         # The first two PIA responses are before the next 200 ms bus cycle.

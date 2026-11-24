@@ -8,7 +8,15 @@ import pytest
 from bms_flux.bridge import Bridge
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import Pack
-from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, frame, settle
+from tests.helpers import (
+    FakeTransport,
+    ManualClock,
+    MemoryMQTT,
+    block,
+    discard_snapshots,
+    frame,
+    settle,
+)
 
 
 @pytest.mark.asyncio
@@ -18,7 +26,9 @@ from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, frame, 
 async def test_fet_changes_publish_full_snapshot_and_clear(mask: int, name: str) -> None:
     packs = [Pack(address=1, serial="PACK")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(
+        Bridge(transport, SeplosV3Decoder(), sink, packs, clock, silent_after_s=120).run()
+    )
     try:
         await settle()
         components = sink.messages[0][1]["components"]
@@ -32,6 +42,7 @@ async def test_fet_changes_publish_full_snapshot_and_clear(mask: int, name: str)
         transport.chunks.put_nowait(block(4, struct.pack(">26H", *([3200] * 16 + [2931] * 10))))
         transport.chunks.put_nowait(block(1, bytes(18)))
         await settle()
+        discard_snapshots(sink)
         clock.advance(2)
         payload = bytearray(18)
         payload[15] = mask
@@ -64,11 +75,14 @@ async def test_fet_changes_publish_full_snapshot_and_clear(mask: int, name: str)
 async def test_balancing_and_mode_changes_do_not_trigger_urgent_snapshot() -> None:
     packs = [Pack(address=1, serial="PACK")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(
+        Bridge(transport, SeplosV3Decoder(), sink, packs, clock, silent_after_s=120).run()
+    )
     try:
         await settle()
-        transport.chunks.put_nowait(block(1, bytes(18)))
+        transport.chunks.put_nowait(frame() + block(4, bytes(52)) + block(1, bytes(18)))
         await settle()
+        discard_snapshots(sink)
         payload = bytearray(18)
         payload[6] = 1
         payload[8] = 2
