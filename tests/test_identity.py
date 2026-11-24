@@ -9,7 +9,7 @@ import pytest
 from bms_flux.bridge import Bridge
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import Pack
-from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, settle
+from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, pack_snapshots, settle
 
 
 def pia(cycles: int = 100, discharge: int = 50, address: int = 1) -> bytes:
@@ -230,7 +230,7 @@ async def test_unmapped_addresses_are_reported_but_never_become_packs(configured
         await settle()
         clock.advance(10)
         await settle()
-        assert not [t for t, _, _ in sink.messages if t.endswith("/state")]
+        assert not pack_snapshots(sink)
         assert payloads(sink, "bms_flux/unmapped_addresses")[-1] == {"unmapped_addresses": [2]}
         configs = [t for t, _, _ in sink.messages if t.startswith("homeassistant/")]
         assert configs == (["homeassistant/device/bms_flux_PACK/config"] if configured else []) + [

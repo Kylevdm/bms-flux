@@ -17,6 +17,7 @@ from tests.helpers import (
     block,
     discard_snapshots,
     frame,
+    pack_snapshots,
     settle,
 )
 
@@ -124,7 +125,7 @@ async def test_pib_and_every_pic_bit_merge_without_losing_pia(tmp_path: Path) ->
         await settle()
         clock.advance(10)
         await settle()
-        snapshot = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
+        snapshot = pack_snapshots(sink)[-1][1]
         assert snapshot["voltage"] == 51.77
         assert snapshot["power"] == pytest.approx(51.77 * -12.59)
         for cell in range(1, 17):
@@ -167,7 +168,7 @@ async def test_pic_bits_are_lsb_first_and_changes_restart_only_that_pack_timer()
         payload[17] = 0x80
         transport.chunks.put_nowait(block(1, bytes(payload)))
         await settle()
-        snapshots = [(t, p) for t, p, _ in sink.messages if t.endswith("/state")]
+        snapshots = [(t, p) for t, p, _ in pack_snapshots(sink)]
         assert len(snapshots) == 1
         assert snapshots[0][0] == "bms_flux/ONE/state"
         assert snapshots[0][1]["cell_8_low_voltage"] is True
@@ -177,16 +178,16 @@ async def test_pic_bits_are_lsb_first_and_changes_restart_only_that_pack_timer()
         assert snapshots[0][1]["balancing_active"] is True
         transport.chunks.put_nowait(block(1, bytes(payload)))
         await settle()
-        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 1
+        assert len(pack_snapshots(sink)) == 1
         clock.advance(6)
         await settle()
-        assert [t for t, _, _ in sink.messages if t.endswith("/state")] == [
+        assert [t for t, _, _ in pack_snapshots(sink)] == [
             "bms_flux/ONE/state",
             "bms_flux/TWO/state",
         ]
         clock.advance(4)
         await settle()
-        assert [t for t, _, _ in sink.messages if t.endswith("/state")][-1] == "bms_flux/ONE/state"
+        assert pack_snapshots(sink)[-1][0] == "bms_flux/ONE/state"
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -325,21 +326,21 @@ async def test_corrupt_pib_and_pic_cannot_change_snapshot_or_trigger_publication
         transport.chunks.put_nowait(block(4, bytes(52)))
         transport.chunks.put_nowait(block(1, bytes(18)))
         await settle()
-        baseline = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
+        baseline = pack_snapshots(sink)[-1][1]
         discard_snapshots(sink)
         for function, payload in ((4, bytes([255] * 52)), (1, bytes([255] * 18))):
             corrupt = bytearray(block(function, payload))
             corrupt[-1] ^= 1
             transport.chunks.put_nowait(bytes(corrupt))
         await settle()
-        assert not [t for t, _, _ in sink.messages if t.endswith("/state")]
+        assert not pack_snapshots(sink)
         clock.advance(1)
         transport.chunks.put_nowait(frame())
         transport.chunks.put_nowait(block(4, bytes(52)) + block(1, bytes(18)))
         await settle()
         clock.advance(9)
         await settle()
-        snapshot = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
+        snapshot = pack_snapshots(sink)[-1][1]
         assert snapshot == baseline
         assert snapshot["cell_1_voltage"] == 0.0
         assert snapshot["cell_1_low_voltage"] is False
@@ -365,7 +366,7 @@ async def test_each_pic_coil_survives_as_one_lsb_first_flag(active_bit: int) -> 
         await settle()
         clock.advance(10)
         await settle()
-        snapshot = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
+        snapshot = pack_snapshots(sink)[-1][1]
         assert len(PIC_COIL_NAMES) == len(set(PIC_COIL_NAMES)) == 144
         for bit, name in enumerate(PIC_COIL_NAMES):
             assert snapshot[name] is (bit == active_bit)

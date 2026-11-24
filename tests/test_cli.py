@@ -1,7 +1,10 @@
 """Console wiring uses retained bridge availability and a retained offline LWT."""
 
+import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import TracebackType
+from typing import cast
 
 import aiomqtt
 import pytest
@@ -26,6 +29,21 @@ async def test_run_sets_retained_offline_lwt_and_publishes_online(
     messages: list[tuple[str, str, bool]] = []
 
     class Client:
+        async def subscribe(self, topic_filter: str) -> None:
+            pass
+
+        async def unsubscribe(self, topic_filter: str) -> None:
+            pass
+
+        @property
+        def messages(self) -> AsyncIterator[aiomqtt.Message]:
+            async def incoming() -> AsyncIterator[aiomqtt.Message]:
+                queue: asyncio.Queue[aiomqtt.Message] = asyncio.Queue()
+                while True:
+                    yield await queue.get()
+
+            return incoming()
+
         async def __aenter__(self) -> "Client":
             return self
 
@@ -83,9 +101,28 @@ async def test_run_only_starts_api_with_token_and_cleans_up(
     events: list[str] = []
     original_cleanup = web.AppRunner.cleanup
 
-    class Client(MemoryMQTT):
+    class Client:
         def __init__(self, **kwargs: object) -> None:
-            super().__init__()
+            self.sink = MemoryMQTT()
+
+        async def subscribe(self, topic_filter: str) -> None:
+            pass
+
+        async def unsubscribe(self, topic_filter: str) -> None:
+            pass
+
+        @property
+        def messages(self) -> AsyncIterator[aiomqtt.Message]:
+            async def incoming() -> AsyncIterator[aiomqtt.Message]:
+                await asyncio.Event().wait()
+                yield cast(aiomqtt.Message, None)
+
+            return incoming()
+
+        async def publish(
+            self, topic: str, payload: str, *, retain: bool = False, qos: int = 0
+        ) -> None:
+            await self.sink.publish(topic, payload, retain=retain, qos=qos)
 
         async def __aenter__(self) -> "Client":
             return self
