@@ -221,6 +221,8 @@ async def test_cli_run_uses_addon_settings_in_supervisor_mode(
     monkeypatch.setattr("bms_flux.cli.SerialTransport.open", staticmethod(fake_open))
 
     class FakeBridge:
+        api = None
+
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
