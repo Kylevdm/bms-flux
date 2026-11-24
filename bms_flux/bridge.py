@@ -11,6 +11,7 @@ from bms_flux.mqtt import MQTTSink
 from bms_flux.protocol import ProtocolDecoder
 from bms_flux.readings import DecodedBlock, ReadingStream
 from bms_flux.settings import Pack
+from bms_flux.stream import StreamPublisher
 from bms_flux.transport import ReadTransport
 
 
@@ -55,6 +56,8 @@ class Bridge:
         clock: Clock,
         snapshot_interval_s: int = 10,
         silent_after_s: int = 10,
+        stream: bool = True,
+        raw_frames: bool = False,
     ) -> None:
         self._transport = transport
         self._decoder = decoder
@@ -66,9 +69,13 @@ class Bridge:
         self._publisher = SnapshotPublisher(
             sink, packs, clock, self._identity, self._lock, snapshot_interval_s
         )
+        self._stream = stream
+        self._raw_frames = raw_frames
+        self._stream_publisher = StreamPublisher(sink, clock, stream=stream, raw_frames=raw_frames)
 
     async def run(self) -> None:
-        stream = ReadingStream()
+        snapshot_stream = ReadingStream()
+        stream_stream: ReadingStream | None = ReadingStream() if self._stream else None
         splitter = FrameSplitter()
         await self._publisher.discover()
         await self._sink.publish(
@@ -77,12 +84,17 @@ class Bridge:
         await self._publisher.sync_links()
         await self._sink.publish("bms_flux/status", "online", retain=True)
         async with asyncio.TaskGroup() as tasks:
-            consumer = tasks.create_task(self._publisher.consume(stream))
+            consumer = tasks.create_task(self._publisher.consume(snapshot_stream))
             publisher = tasks.create_task(self._publisher.publish_snapshots())
+            stream_consumer: asyncio.Task[None] | None = None
+            if stream_stream is not None:
+                stream_consumer = tasks.create_task(self._stream_publisher.consume(stream_stream))
             try:
                 while True:
                     data = await self._transport.read()
                     for frame in splitter.feed(data, final=not data):
+                        if self._raw_frames:
+                            await self._stream_publisher.publish_raw(frame.data)
                         if frame.kind == "resp":
                             async with self._lock:
                                 self._identity.expire(self._clock.now())
@@ -101,12 +113,20 @@ class Bridge:
                                             ),
                                         )
                                     for reading in self._identity.accept(block, self._clock.now()):
-                                        await stream.put(reading)
-                                    await stream.join()
+                                        await snapshot_stream.put(reading)
+                                        if stream_stream is not None:
+                                            await stream_stream.put(reading)
+                                    await snapshot_stream.join()
+                                    if stream_stream is not None:
+                                        await stream_stream.join()
                                     await self._publisher.sync_links()
                     if not data:
-                        await stream.join()
+                        await snapshot_stream.join()
+                        if stream_stream is not None:
+                            await stream_stream.join()
                         break
             finally:
                 consumer.cancel()
                 publisher.cancel()
+                if stream_consumer is not None:
+                    stream_consumer.cancel()

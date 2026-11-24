@@ -50,6 +50,8 @@ async def run() -> None:
                 SystemClock(),
                 snapshot_interval_s=settings.snapshot_interval_s,
                 silent_after_s=settings.silent_after_s,
+                stream=settings.stream,
+                raw_frames=settings.raw_frames,
             ).run()
         finally:
             transport.close()
