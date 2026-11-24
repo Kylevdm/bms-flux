@@ -52,6 +52,10 @@ _Avoid_: Connection, link
 The latest reading of each pack, published to Home Assistant on an interval or as soon as an alarm, protection or FET state changes.
 _Avoid_: Sample, update, poll
 
+**Stream**:
+Every reading of every mapped pack, at the rate it crosses the bus, offered to apps other than Home Assistant.
+_Avoid_: Feed, firehose, telemetry
+
 **Link state**:
 Whether bms-flux can currently vouch for a pack's readings, and if not, why (the pack has gone silent, or its fingerprint no longer matches).
 _Avoid_: Status, connection
