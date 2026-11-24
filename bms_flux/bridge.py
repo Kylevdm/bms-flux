@@ -8,6 +8,7 @@ from typing import Any
 
 from bms_flux.bank import BankPublisher
 from bms_flux.clock import Clock
+from bms_flux.drift.divergence import Divergence
 from bms_flux.drift.findings import FindingStore
 from bms_flux.drift.full_charge import RULE as FULL_CHARGE_RULE
 from bms_flux.drift.full_charge import FullCharge
@@ -19,7 +20,7 @@ from bms_flux.identity import PackIdentity
 from bms_flux.mqtt import MQTTSink
 from bms_flux.protocol import ProtocolDecoder
 from bms_flux.readings import DecodedBlock, ReadingStream
-from bms_flux.settings import DriftFullCharge, DriftRestedOCV, OCVPoint, Pack
+from bms_flux.settings import DriftDivergence, DriftFullCharge, DriftRestedOCV, OCVPoint, Pack
 from bms_flux.stream import StreamPublisher
 from bms_flux.transport import ReadTransport
 
@@ -66,6 +67,7 @@ class Bridge:
         snapshot_interval_s: int = 10,
         silent_after_s: int = 10,
         drift_full_charge: DriftFullCharge | None = None,
+        drift_divergence: DriftDivergence | None = None,
         state_dir: Path = Path("state"),
         drift_rested_ocv: DriftRestedOCV | None = None,
         ocv_table: list[OCVPoint] | None = None,
@@ -81,6 +83,9 @@ class Bridge:
         self._lock = asyncio.Lock()
         self._packs = packs
         self._store = FindingStore(state_dir, sink)
+        self._divergence: Divergence | None = None
+        if drift_divergence is not None and drift_divergence.enabled:
+            self._divergence = Divergence(drift_divergence, sink)
         self._rules: dict[str, FullCharge | RestedOCV] = {}
         if drift_full_charge is not None and drift_full_charge.enabled:
             self._rules[FULL_CHARGE_RULE] = FullCharge(
@@ -90,7 +95,14 @@ class Bridge:
             self._rules[RESTED_OCV_RULE] = RestedOCV(
                 drift_rested_ocv, self._store, self._identity, silent_after_s, ocv_table or []
             )
-        self._bank = BankPublisher(sink, clock, self._identity, self._lock, snapshot_interval_s)
+        self._bank = BankPublisher(
+            sink,
+            clock,
+            self._identity,
+            self._lock,
+            snapshot_interval_s,
+            divergence=self._divergence,
+        )
         self._publisher = SnapshotPublisher(
             sink,
             packs,
@@ -113,6 +125,8 @@ class Bridge:
 
     async def republish_findings(self) -> None:
         """Republish all configured finding states after broker reconnect."""
+        if self._divergence is not None:
+            await self._divergence.publish()
         for rule in self._rules:
             for pack in self._packs:
                 await self._store.publish(rule, pack.serial)

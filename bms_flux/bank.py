@@ -5,6 +5,7 @@ import json
 from collections import deque
 
 from bms_flux.clock import Clock
+from bms_flux.drift.divergence import Divergence
 from bms_flux.frames import Frame
 from bms_flux.identity import PackIdentity
 from bms_flux.mqtt import MQTTSink
@@ -25,12 +26,14 @@ class BankPublisher:
         identity: PackIdentity,
         lock: asyncio.Lock,
         snapshot_interval_s: int,
+        divergence: Divergence | None = None,
     ) -> None:
         self._sink = sink
         self._clock = clock
         self._identity = identity
         self._lock = lock
         self._interval = snapshot_interval_s
+        self._divergence = divergence
         self._deadline = clock.now() + snapshot_interval_s
         self._available: bool | None = None
         self._latest: dict[str, dict[str, FieldValue]] = {}
@@ -101,6 +104,24 @@ class BankPublisher:
             elif name == "crc_errors":
                 component["state_class"] = "total_increasing"
             components[name] = component
+        if self._divergence is not None:
+            components["drift_divergence"] = {
+                "platform": "binary_sensor",
+                "name": "Divergence",
+                "unique_id": "bms_flux_drift_divergence",
+                "default_entity_id": "binary_sensor.bms_flux_drift_divergence",
+                "device_class": "problem",
+                "state_topic": "bms_flux/bank/drift_divergence",
+                "value_template": "{{ 'ON' if value_json.active else 'OFF' }}",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "json_attributes_topic": "bms_flux/bank/drift_divergence",
+                "availability": [
+                    {"topic": "bms_flux/status"},
+                    {"topic": "bms_flux/bank/availability"},
+                ],
+                "availability_mode": "all",
+            }
         components["unmapped_addresses"] = {
             "platform": "sensor",
             "name": "Unmapped addresses",
@@ -176,6 +197,12 @@ class BankPublisher:
         capacity = sum(capacities)
         # A zero reported full capacity cannot define a weighted reported SoC.
         available = available and capacity != 0
+        spread = 0.0
+        if fields:
+            socs = [self._number(f, "reported_soc") for f in fields]
+            spread = max(socs) - min(socs)
+        if self._divergence is not None:
+            await self._divergence.evaluate(available, spread, self._clock.now())
         recovered = available and not self._available
         if available != self._available:
             self._available = available
