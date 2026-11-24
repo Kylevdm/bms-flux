@@ -18,9 +18,21 @@ _Avoid_: Pack ID, device ID
 The daisy-chained RS485 link that joins the packs and the adapter.
 _Avoid_: Chain, line
 
+**Master pack**:
+The pack that wins auto-addressing and polls every pack on the bus, itself included. bms-flux reads the bus by listening to it.
+_Avoid_: Primary, leader, host
+
 **Bus address**:
 The number a pack answers to on the bus. It is assigned automatically and may change, so it never identifies a pack.
 _Avoid_: Slave ID, unit ID
+
+**Fingerprint**:
+The counters a pack reports that only ever rise, its cycle count and lifetime discharge, used to check that a bus address still belongs to the same pack.
+_Avoid_: Signature, checksum
+
+**Reading**:
+One decoded block of a pack's data at one moment, keyed by pack serial.
+_Avoid_: Sample, message, frame
 
 **Transport**:
 The way bms-flux reaches the bus: a local serial adapter, or a network gateway that carries the bus over TCP.
