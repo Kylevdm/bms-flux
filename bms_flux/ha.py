@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from bms_flux.clock import Clock
+from bms_flux.drift.findings import finding_component
 from bms_flux.identity import LinkState, PackIdentity
 from bms_flux.mqtt import MQTTSink
 from bms_flux.protocol.seplos_v3 import SYSTEM_STATES
@@ -20,7 +21,9 @@ class SnapshotPublisher:
         identity: PackIdentity,
         lock: asyncio.Lock,
         snapshot_interval_s: int = 10,
+        finding_rules: list[str] | None = None,
     ) -> None:
+        self._finding_rules = finding_rules or []
         self._lock = lock
         self._identity = identity
         self._links: dict[str, LinkState] = {}
@@ -136,6 +139,8 @@ class SnapshotPublisher:
                 "state_topic": f"bms_flux/{pack.serial}/link",
                 "availability": [{"topic": "bms_flux/status"}],
             }
+            for rule in self._finding_rules:
+                components[rule] = finding_component(rule, pack.serial)
             payload = {
                 "device": {
                     "identifiers": [identifier],
