@@ -50,6 +50,8 @@ async def run() -> None:
                 SystemClock(),
                 snapshot_interval_s=settings.snapshot_interval_s,
                 silent_after_s=settings.silent_after_s,
+                drift_full_charge=settings.drift_full_charge,
+                state_dir=settings.state_dir,
                 stream=settings.stream,
                 raw_frames=settings.raw_frames,
             ).run()

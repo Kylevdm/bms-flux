@@ -1,16 +1,21 @@
-"""Wire the read-only transport through framing and decoding to one reading stream."""
+"""Fan out trusted readings from the read-only transport to independent consumers."""
 
 import asyncio
 import json
+from collections.abc import Callable, Coroutine
+from pathlib import Path
+from typing import Any
 
 from bms_flux.clock import Clock
+from bms_flux.drift.findings import FindingStore
+from bms_flux.drift.full_charge import RULE, FullCharge
 from bms_flux.frames import FrameSplitter
 from bms_flux.ha import SnapshotPublisher
 from bms_flux.identity import PackIdentity
 from bms_flux.mqtt import MQTTSink
 from bms_flux.protocol import ProtocolDecoder
 from bms_flux.readings import DecodedBlock, ReadingStream
-from bms_flux.settings import Pack
+from bms_flux.settings import DriftFullCharge, Pack
 from bms_flux.stream import StreamPublisher
 from bms_flux.transport import ReadTransport
 
@@ -56,6 +61,8 @@ class Bridge:
         clock: Clock,
         snapshot_interval_s: int = 10,
         silent_after_s: int = 10,
+        drift_full_charge: DriftFullCharge | None = None,
+        state_dir: Path = Path("state"),
         stream: bool = True,
         raw_frames: bool = False,
     ) -> None:
@@ -66,29 +73,57 @@ class Bridge:
         self._identity = PackIdentity(packs, silent_after_s)
         self._unmapped: set[int] = set()
         self._lock = asyncio.Lock()
-        self._publisher = SnapshotPublisher(
-            sink, packs, clock, self._identity, self._lock, snapshot_interval_s
+        self._packs = packs
+        self._store = FindingStore(state_dir, sink)
+        self._full_charge = (
+            FullCharge(drift_full_charge, self._store, self._identity, silent_after_s)
+            if drift_full_charge is not None and drift_full_charge.enabled
+            else None
         )
-        self._stream = stream
+        self._publisher = SnapshotPublisher(
+            sink,
+            packs,
+            clock,
+            self._identity,
+            self._lock,
+            snapshot_interval_s,
+            finding_rules=[RULE] if self._full_charge is not None else [],
+        )
         self._raw_frames = raw_frames
         self._stream_publisher = StreamPublisher(sink, clock, stream=stream, raw_frames=raw_frames)
+        # Every consumer of trusted readings gets its own queue (the fan-out).
+        self._consumers: list[Callable[[ReadingStream], Coroutine[Any, Any, None]]] = [
+            self._publisher.consume
+        ]
+        if self._full_charge is not None:
+            self._consumers.append(self._full_charge.consume)
+        if stream:
+            self._consumers.append(self._stream_publisher.consume)
+
+    async def republish_findings(self) -> None:
+        """Republish all configured finding states after broker reconnect."""
+        if self._full_charge is not None:
+            for pack in self._packs:
+                await self._store.publish(RULE, pack.serial)
 
     async def run(self) -> None:
-        snapshot_stream = ReadingStream()
-        stream_stream: ReadingStream | None = ReadingStream() if self._stream else None
+        queues = [ReadingStream() for _ in self._consumers]
         splitter = FrameSplitter()
+        if self._full_charge is not None:
+            await asyncio.to_thread(self._store.load)
         await self._publisher.discover()
+        await self.republish_findings()
         await self._sink.publish(
             "bms_flux/unmapped_addresses", json.dumps({"unmapped_addresses": []})
         )
         await self._publisher.sync_links()
         await self._sink.publish("bms_flux/status", "online", retain=True)
         async with asyncio.TaskGroup() as tasks:
-            consumer = tasks.create_task(self._publisher.consume(snapshot_stream))
-            publisher = tasks.create_task(self._publisher.publish_snapshots())
-            stream_consumer: asyncio.Task[None] | None = None
-            if stream_stream is not None:
-                stream_consumer = tasks.create_task(self._stream_publisher.consume(stream_stream))
+            running: list[asyncio.Task[None]] = [
+                tasks.create_task(consume(queue))
+                for consume, queue in zip(self._consumers, queues, strict=True)
+            ]
+            running.append(tasks.create_task(self._publisher.publish_snapshots()))
             try:
                 while True:
                     data = await self._transport.read()
@@ -99,6 +134,8 @@ class Bridge:
                             async with self._lock:
                                 self._identity.expire(self._clock.now())
                                 await self._publisher.sync_links()
+                                if self._full_charge is not None:
+                                    self._full_charge.reset_unavailable()
                                 block = self._decoder.decode(frame.data, self._clock.now())
                                 if block is not None:
                                     if (
@@ -113,20 +150,15 @@ class Bridge:
                                             ),
                                         )
                                     for reading in self._identity.accept(block, self._clock.now()):
-                                        await snapshot_stream.put(reading)
-                                        if stream_stream is not None:
-                                            await stream_stream.put(reading)
-                                    await snapshot_stream.join()
-                                    if stream_stream is not None:
-                                        await stream_stream.join()
+                                        for queue in queues:
+                                            await queue.put(reading)
+                                    for queue in queues:
+                                        await queue.join()
                                     await self._publisher.sync_links()
                     if not data:
-                        await snapshot_stream.join()
-                        if stream_stream is not None:
-                            await stream_stream.join()
+                        for queue in queues:
+                            await queue.join()
                         break
             finally:
-                consumer.cancel()
-                publisher.cancel()
-                if stream_consumer is not None:
-                    stream_consumer.cancel()
+                for task in running:
+                    task.cancel()
