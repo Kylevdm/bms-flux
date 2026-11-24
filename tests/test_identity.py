@@ -198,8 +198,11 @@ async def test_label_changes_only_device_name_and_link_follows_bridge() -> None:
     for label in (None, "Garage", "Renamed"):
         packs = [Pack(address=1, serial="PACK", label=label)]
         transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-        transport.chunks.put_nowait(b"")
-        await Bridge(transport, SeplosV3Decoder(), sink, packs, clock).run()
+        task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(), sink, packs, clock).run())
+        await settle()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
         config = sink.messages[0][1]
         assert config["device"]["name"] == (label or "PACK")
         components = config["components"]

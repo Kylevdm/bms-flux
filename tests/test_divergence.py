@@ -97,7 +97,7 @@ async def cleanup(
     transport: FakeTransport,
     task: asyncio.Task[None],
 ) -> None:
-    transport.chunks.put_nowait(b"")
+    task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
 
@@ -208,5 +208,23 @@ async def test_republish_divergence_after_reconnect(tmp_path: Path) -> None:
         after = states(sink)
         assert len(after) == before + 1
         assert after[-1]["active"] is True
+    finally:
+        await cleanup(transport, task)
+
+
+@pytest.mark.asyncio
+async def test_broker_reconnect_resets_the_divergence_hold(tmp_path: Path) -> None:
+    bridge, transport, sink, clock, task = await running_bridge(tmp_path, hold_min=30)
+    try:
+        await play(transport, clock, 20 * 60, 700, 500)
+        first_start = states(sink)[-1]["hold_start"]
+        assert first_start is not None
+        await bridge.republish()
+        await settle()
+        # The hold restarted at the reconnect rather than carrying over.
+        assert states(sink)[-1]["hold_start"] == clock.now() != first_start
+        # The hold restarts from the reconnect, so 20 more minutes is not enough.
+        await play(transport, clock, 20 * 60, 700, 500)
+        assert states(sink)[-1]["active"] is False
     finally:
         await cleanup(transport, task)

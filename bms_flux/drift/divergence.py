@@ -30,7 +30,7 @@ class Divergence:
         self._last_spread = spread
         if not available:
             if self._active or self._hold_start is not None or self._clear_start is not None:
-                self._reset()
+                self.reset()
                 await self._publish()
             return
 
@@ -61,7 +61,7 @@ class Divergence:
                 self._clear_start = None
                 await self._publish()
 
-    def _reset(self) -> None:
+    def reset(self) -> None:
         self._active = False
         self._hold_start = None
         self._clear_start = None

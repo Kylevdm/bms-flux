@@ -158,6 +158,11 @@ class SnapshotPublisher:
                 f"homeassistant/device/{identifier}/config", json.dumps(payload), retain=True
             )
 
+    async def republish(self) -> None:
+        """Force every link state and each available pack's fresh snapshot."""
+        self._links.clear()
+        await self.sync_links()
+
     async def sync_links(self) -> None:
         # Publishing awaits, and time moves on meanwhile: re-expire and repeat until the
         # published link states match identity, so a stall can't leave a stale "ok" behind.

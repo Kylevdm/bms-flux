@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable, Coroutine
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from bms_flux.api import LocalAPI
 from bms_flux.bank import BankPublisher
 from bms_flux.clock import Clock
 from bms_flux.drift.divergence import Divergence
@@ -17,12 +20,12 @@ from bms_flux.drift.rested_ocv import RestedOCV
 from bms_flux.frames import FrameSplitter
 from bms_flux.ha import SnapshotPublisher
 from bms_flux.identity import PackIdentity
-from bms_flux.mqtt import MQTTSink
+from bms_flux.mqtt import ContainedSink, MQTTSink, ReconnectingSink
 from bms_flux.protocol import ProtocolDecoder
-from bms_flux.readings import DecodedBlock, ReadingStream
+from bms_flux.readings import DecodedBlock, Reading, ReadingStream
 from bms_flux.settings import DriftDivergence, DriftFullCharge, DriftRestedOCV, OCVPoint, Pack
 from bms_flux.stream import StreamPublisher
-from bms_flux.transport import ReadTransport
+from bms_flux.transport import BusState, ReadTransport
 
 
 async def probe_blocks(
@@ -56,6 +59,24 @@ async def probe_blocks(
     return heard
 
 
+_LOG = logging.getLogger(__name__)
+
+
+class _ConsumerStream(ReadingStream):
+    """Track the in-flight reading so a failed consumer cannot strand join()."""
+
+    active = False
+
+    async def get(self) -> Reading:
+        reading = await super().get()
+        self.active = True
+        return reading
+
+    def task_done(self) -> None:
+        self.active = False
+        super().task_done()
+
+
 class Bridge:
     def __init__(
         self,
@@ -73,12 +94,17 @@ class Bridge:
         ocv_table: list[OCVPoint] | None = None,
         stream: bool = True,
         raw_frames: bool = False,
+        api_token: str = "",
+        bus_state: Callable[[], BusState] = lambda: "connected",
     ) -> None:
         self._transport = transport
         self._decoder = decoder
         self._clock = clock
+        self._reconnecting = sink if isinstance(sink, ReconnectingSink) else None
+        sink = ContainedSink(sink)
         self._sink = sink
         self._identity = PackIdentity(packs, silent_after_s)
+        self.api = LocalAPI(api_token, self._identity, raw_frames=raw_frames) if api_token else None
         self._unmapped: set[int] = set()
         self._lock = asyncio.Lock()
         self._packs = packs
@@ -101,6 +127,7 @@ class Bridge:
             self._identity,
             self._lock,
             snapshot_interval_s,
+            bus_state,
             divergence=self._divergence,
         )
         self._publisher = SnapshotPublisher(
@@ -122,6 +149,8 @@ class Bridge:
         self._consumers.extend(rule.consume for rule in self._rules.values())
         if stream:
             self._consumers.append(self._stream_publisher.consume)
+            if self.api is not None:
+                self._consumers.append(self.api.consume)
 
     async def republish_findings(self) -> None:
         """Republish all configured finding states after broker reconnect."""
@@ -131,44 +160,101 @@ class Bridge:
             for pack in self._packs:
                 await self._store.publish(rule, pack.serial)
 
+    async def republish(self) -> None:
+        """Restore discovery and current state without replaying the stream."""
+        await self._contain(self._bank.clean_discovery, restart=False)
+        await self._contain(self._publisher.discover, restart=False)
+        await self._contain(self._bank.discover, restart=False)
+        async with self._lock:
+            await self._republish()
+
+    async def _republish(self) -> None:
+        if self._divergence is not None:
+            # A broker outage is a gap: the divergence hold starts over.
+            self._divergence.reset()
+        await self._sink.publish("bms_flux/status", "online", retain=True)
+        await self._contain(self._publisher.republish, restart=False)
+        await self._contain(self._bank.republish, restart=False)
+        await self._contain(self.republish_findings, restart=False)
+        await self._sink.publish(
+            "bms_flux/unmapped_addresses",
+            json.dumps({"unmapped_addresses": sorted(self._unmapped)}),
+        )
+
+    async def _contain(
+        self,
+        operation: Callable[[], Coroutine[Any, Any, None]],
+        queue: _ConsumerStream | None = None,
+        *,
+        restart: bool = True,
+    ) -> None:
+        while True:
+            try:
+                await operation()
+                return
+            except Exception as error:
+                _LOG.exception("Consumer failed (%s)", type(error).__name__)
+                if queue is not None:
+                    if not queue.active:
+                        await queue.get()
+                    queue.task_done()
+                if not restart:
+                    return
+                await asyncio.sleep(0)
+
     async def run(self) -> None:
-        queues = [ReadingStream() for _ in self._consumers]
-        splitter = FrameSplitter()
         if self._rules:
             await asyncio.to_thread(self._store.load)
-        await self._bank.clean_discovery()
-        await self._publisher.discover()
-        await self._bank.discover()
-        await self._bank.sync()
-        await self._bank.publish_health()
-        await self.republish_findings()
-        await self._sink.publish(
-            "bms_flux/unmapped_addresses", json.dumps({"unmapped_addresses": []})
-        )
-        await self._publisher.sync_links()
-        await self._sink.publish("bms_flux/status", "online", retain=True)
+        if self._reconnecting is None:
+            await self.republish()
+            await self._run()
+            return
+        async with asyncio.TaskGroup() as tasks:
+            broker = tasks.create_task(self._reconnecting.run(self.republish))
+            try:
+                await self._run()
+                await self._reconnecting.ready.wait()
+            finally:
+                broker.cancel()
+
+    async def _run(self) -> None:
+        queues = [_ConsumerStream() for _ in self._consumers]
+        splitter = FrameSplitter()
         async with asyncio.TaskGroup() as tasks:
             running: list[asyncio.Task[None]] = [
-                tasks.create_task(consume(queue))
+                tasks.create_task(self._contain(partial(consume, queue), queue))
                 for consume, queue in zip(self._consumers, queues, strict=True)
             ]
-            running.append(tasks.create_task(self._publisher.publish_snapshots()))
-            running.append(tasks.create_task(self._bank.publish_snapshots()))
+            running.append(tasks.create_task(self._contain(self._publisher.publish_snapshots)))
+            running.append(tasks.create_task(self._contain(self._bank.publish_snapshots)))
             try:
                 while True:
                     data = await self._transport.read()
-                    frames = splitter.feed(data, final=not data)
+                    if not data:
+                        raise ConnectionError("unsupervised transport closed")
+                    frames = splitter.feed(data)
                     self._bank.record_frames(frames, splitter.crc_errors)
-                    await self._bank.publish_health()
+                    await self._contain(self._bank.publish_health, restart=False)
                     for frame in frames:
                         if self._raw_frames:
-                            await self._stream_publisher.publish_raw(frame.data)
+                            ts = self._clock.now()
+                            if self.api is not None:
+                                self.api.publish_raw(frame.data, ts)
+                            await self._contain(
+                                partial(self._stream_publisher.publish_raw, frame.data, ts=ts),
+                                restart=False,
+                            )
                         if frame.kind == "resp":
                             async with self._lock:
                                 self._identity.expire(self._clock.now())
-                                await self._publisher.sync_links()
+                                await self._contain(self._publisher.sync_links, restart=False)
                                 for rule in self._rules.values():
-                                    rule.reset_unavailable()
+                                    try:
+                                        rule.reset_unavailable()
+                                    except Exception as error:
+                                        _LOG.exception(
+                                            "Drift rule failed (%s)", type(error).__name__
+                                        )
                                 block = self._decoder.decode(frame.data, self._clock.now())
                                 if block is not None:
                                     if (
@@ -187,12 +273,8 @@ class Bridge:
                                             await queue.put(reading)
                                     for queue in queues:
                                         await queue.join()
-                                    await self._publisher.sync_links()
-                                    await self._bank.sync()
-                    if not data:
-                        for queue in queues:
-                            await queue.join()
-                        break
+                                    await self._contain(self._publisher.sync_links, restart=False)
+                                    await self._contain(self._bank.sync, restart=False)
             finally:
                 for task in running:
                     task.cancel()

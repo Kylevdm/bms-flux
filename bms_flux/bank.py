@@ -3,6 +3,7 @@
 import asyncio
 import json
 from collections import deque
+from collections.abc import Callable
 
 from bms_flux.clock import Clock
 from bms_flux.drift.divergence import Divergence
@@ -16,6 +17,7 @@ from bms_flux.settings import (
     BUS_HEALTH_WINDOW_S,
     DISCOVERY_PREFIX,
 )
+from bms_flux.transport import BusState
 
 
 class BankPublisher:
@@ -26,9 +28,11 @@ class BankPublisher:
         identity: PackIdentity,
         lock: asyncio.Lock,
         snapshot_interval_s: int,
+        bus_state: Callable[[], BusState] = lambda: "connected",
         divergence: Divergence | None = None,
     ) -> None:
         self._sink = sink
+        self._bus_state = bus_state
         self._clock = clock
         self._identity = identity
         self._lock = lock
@@ -122,6 +126,17 @@ class BankPublisher:
                 ],
                 "availability_mode": "all",
             }
+        components["bus"] = {
+            "platform": "sensor",
+            "name": "Bus",
+            "unique_id": "bms_flux_bus",
+            "default_entity_id": "sensor.bms_flux_bus",
+            "device_class": "enum",
+            "options": ["connected", "reconnecting", "port_busy"],
+            "state_topic": "bms_flux/bus/state",
+            "value_template": "{{ value_json.bus }}",
+            "availability": [{"topic": "bms_flux/status"}],
+        }
         components["unmapped_addresses"] = {
             "platform": "sensor",
             "name": "Unmapped addresses",
@@ -164,6 +179,7 @@ class BankPublisher:
         elif ratio < BUS_HEALTH_CLEAR_RATIO:
             self._problem = False
         health: dict[str, object] = {
+            "bus": self._bus_state(),
             "frames_per_second": good / BUS_HEALTH_WINDOW_S,
             "crc_errors": self._crc_errors,
             "master_pack_seen": self._master_seen is not None
@@ -173,7 +189,8 @@ class BankPublisher:
         # frames/s moves on almost every read; publish on the snapshot interval, and at
         # once only when a state HA acts on (bus_problem, master seen) flips.
         flipped = any(
-            health[key] != self._health.get(key) for key in ("bus_problem", "master_pack_seen")
+            health[key] != self._health.get(key)
+            for key in ("bus_problem", "master_pack_seen", "bus")
         )
         if flipped or now >= self._health_deadline:
             self._health = health
@@ -186,6 +203,14 @@ class BankPublisher:
             if reading.block == "PIA":
                 self._latest[reading.serial] = reading.fields
             stream.task_done()
+
+    async def republish(self) -> None:
+        """Restore bank availability, snapshot and bus health after reconnect."""
+        self._available = None
+        self._deadline = self._clock.now()
+        self._health_deadline = self._clock.now()
+        await self.sync()
+        await self.publish_health()
 
     async def sync(self) -> None:
         self._identity.expire(self._clock.now())
