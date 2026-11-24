@@ -1,4 +1,4 @@
-"""Decode Seplos V3 blocks using the owner's address-to-serial mapping.
+"""Decode Seplos V3 blocks by bus address, without assigning pack identity.
 
 PIC flags without a bit definition in the protocol decision retain their absolute,
 zero-based coil number. No meaning is inferred from the captured flag values.
@@ -6,8 +6,7 @@ zero-based coil number. No meaning is inferred from the captured flag values.
 
 import struct
 
-from bms_flux.readings import FieldValue, Reading
-from bms_flux.settings import Pack
+from bms_flux.readings import DecodedBlock, FieldValue
 
 # Byte 8 is TB09, followed by TB02/03/04/05/16/06/07/08/15.
 PIC_TABLES: dict[int, tuple[str, ...]] = {
@@ -82,14 +81,8 @@ SYSTEM_STATES = ["discharge", "charge", "floating_charge", "full_charge", "stand
 
 
 class SeplosV3Decoder:
-    def __init__(self, packs: list[Pack]) -> None:
-        self._serials = {pack.address: pack.serial for pack in packs}
-
-    def decode(self, frame: bytes, timestamp: float) -> Reading | None:
+    def decode(self, frame: bytes, timestamp: float) -> DecodedBlock | None:
         if len(frame) < 5:
-            return None
-        serial = self._serials.get(frame[0])
-        if serial is None:
             return None
         fields: dict[str, FieldValue]
         if len(frame) == 41 and frame[1:3] == b"\x04\x24":
@@ -170,4 +163,4 @@ class SeplosV3Decoder:
             fields["event_flags"] = events
         else:
             return None
-        return Reading(serial, frame[0], timestamp, block, fields)
+        return DecodedBlock(frame[0], timestamp, block, fields)

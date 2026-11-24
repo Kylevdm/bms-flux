@@ -1,8 +1,10 @@
 """Publish pack device discovery and interval-based Home Assistant snapshots."""
 
+import asyncio
 import json
 
 from bms_flux.clock import Clock
+from bms_flux.identity import LinkState, PackIdentity
 from bms_flux.mqtt import MQTTSink
 from bms_flux.protocol.seplos_v3 import SYSTEM_STATES
 from bms_flux.readings import FieldValue, ReadingStream
@@ -11,8 +13,17 @@ from bms_flux.settings import Pack
 
 class SnapshotPublisher:
     def __init__(
-        self, sink: MQTTSink, packs: list[Pack], clock: Clock, snapshot_interval_s: int = 10
+        self,
+        sink: MQTTSink,
+        packs: list[Pack],
+        clock: Clock,
+        identity: PackIdentity,
+        lock: asyncio.Lock,
+        snapshot_interval_s: int = 10,
     ) -> None:
+        self._lock = lock
+        self._identity = identity
+        self._links: dict[str, LinkState] = {}
         self._sink = sink
         self._packs = packs
         self._clock = clock
@@ -109,10 +120,26 @@ class SnapshotPublisher:
             )
             components["system_state"]["device_class"] = "enum"
             components["system_state"]["options"] = [*SYSTEM_STATES, "unknown"]
+            for component in components.values():
+                component["availability"] = [
+                    {"topic": "bms_flux/status"},
+                    {"topic": f"bms_flux/{pack.serial}/availability"},
+                ]
+                component["availability_mode"] = "all"
+            components["link"] = {
+                "platform": "sensor",
+                "name": "Link",
+                "unique_id": f"{identifier}_link",
+                "default_entity_id": f"sensor.{identifier.lower()}_link",
+                "device_class": "enum",
+                "options": ["ok", "silent", "fingerprint_mismatch"],
+                "state_topic": f"bms_flux/{pack.serial}/link",
+                "availability": [{"topic": "bms_flux/status"}],
+            }
             payload = {
                 "device": {
                     "identifiers": [identifier],
-                    "name": pack.serial,
+                    "name": pack.label if pack.label is not None else pack.serial,
                     "manufacturer": "Seplos",
                     "model": "V3",
                     "serial_number": pack.serial,
@@ -125,6 +152,49 @@ class SnapshotPublisher:
                 f"homeassistant/device/{identifier}/config", json.dumps(payload), retain=True
             )
 
+        await self._sink.publish(
+            "homeassistant/device/bms_flux_bridge/config",
+            json.dumps(
+                {
+                    "device": {"identifiers": ["bms_flux_bridge"], "name": "bms-flux"},
+                    "origin": {"name": "bms-flux"},
+                    "components": {
+                        "unmapped_addresses": {
+                            "platform": "sensor",
+                            "name": "Unmapped addresses",
+                            "unique_id": "bms_flux_unmapped_addresses",
+                            "default_entity_id": "sensor.bms_flux_unmapped_addresses",
+                            "state_topic": "bms_flux/unmapped_addresses",
+                            "value_template": "{{ value_json.unmapped_addresses | join(', ') }}",
+                            "availability": [{"topic": "bms_flux/status"}],
+                        }
+                    },
+                }
+            ),
+            retain=True,
+        )
+
+    async def sync_links(self) -> None:
+        # Publishing awaits, and time moves on meanwhile: re-expire and repeat until the
+        # published link states match identity, so a stall can't leave a stale "ok" behind.
+        changed = True
+        while changed:
+            changed = False
+            self._identity.expire(self._clock.now())
+            for serial, link in list(self._identity.links.items()):
+                if self._links.get(serial) == link:
+                    continue
+                changed = True
+                self._links[serial] = link
+                await self._sink.publish(f"bms_flux/{serial}/link", link, retain=True)
+                await self._sink.publish(
+                    f"bms_flux/{serial}/availability",
+                    "online" if link == "ok" else "offline",
+                    retain=True,
+                )
+                if link == "ok":
+                    await self._publish(serial)
+
     async def consume(self, stream: ReadingStream) -> None:
         while True:
             reading = await stream.get()
@@ -133,17 +203,25 @@ class SnapshotPublisher:
             if reading.block == "PIC":
                 previous = self._pic.get(reading.serial)
                 self._pic[reading.serial] = reading.fields
-                if previous is not None and any(
-                    previous.get(name) != value
-                    for name, value in reading.fields.items()
-                    if name.endswith(("_alarm", "_protection", "_fault", "_latch", "_fet"))
-                    or name == "output_short_circuit"
-                    or (name.startswith("cell_") and not name.endswith("_balancing"))
+                if (
+                    self._links.get(reading.serial) == "ok"
+                    and previous is not None
+                    and any(
+                        previous.get(name) != value
+                        for name, value in reading.fields.items()
+                        if name.endswith(("_alarm", "_protection", "_fault", "_latch", "_fet"))
+                        or name == "output_short_circuit"
+                        or (name.startswith("cell_") and not name.endswith("_balancing"))
+                    )
                 ):
                     await self._publish(reading.serial)
             stream.task_done()
 
     async def _publish(self, serial: str) -> None:
+        # Freshness is rechecked here, after any awaits that led to this publish.
+        self._identity.expire(self._clock.now())
+        if self._identity.links[serial] != "ok":
+            return
         await self._sink.publish(f"bms_flux/{serial}/state", json.dumps(self._latest[serial]))
         self._deadlines[serial] = self._clock.now() + self._snapshot_interval_s
 
@@ -152,10 +230,14 @@ class SnapshotPublisher:
             delay = min(
                 self._deadlines.values(), default=self._clock.now() + self._snapshot_interval_s
             )
+            delay = min(delay, self._identity.next_expiry(self._clock.now()))
             await self._clock.sleep(max(0, delay - self._clock.now()))
-            for serial, deadline in self._deadlines.copy().items():
-                if deadline <= self._clock.now():
-                    if serial in self._latest:
-                        await self._publish(serial)
-                    else:
-                        self._deadlines[serial] = self._clock.now() + self._snapshot_interval_s
+            async with self._lock:
+                self._identity.expire(self._clock.now())
+                await self.sync_links()
+                for serial, deadline in self._deadlines.copy().items():
+                    if deadline <= self._clock.now():
+                        if self._identity.links[serial] == "ok" and serial in self._latest:
+                            await self._publish(serial)
+                        else:
+                            self._deadlines[serial] = self._clock.now() + self._snapshot_interval_s

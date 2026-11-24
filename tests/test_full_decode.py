@@ -10,7 +10,15 @@ import pytest
 from bms_flux.bridge import Bridge
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import Pack
-from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, frame, settle
+from tests.helpers import (
+    FakeTransport,
+    ManualClock,
+    MemoryMQTT,
+    block,
+    discard_snapshots,
+    frame,
+    settle,
+)
 
 PIC_COIL_NAMES = (
     [f"cell_{i}_low_voltage" for i in range(1, 17)]
@@ -107,7 +115,7 @@ PIC_COIL_NAMES = (
 async def test_pib_and_every_pic_bit_merge_without_losing_pia(tmp_path: Path) -> None:
     packs = [Pack(address=1, serial="PACK")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(), sink, packs, clock).run())
     try:
         await settle()
         transport.chunks.put_nowait(frame())
@@ -141,13 +149,17 @@ async def test_pib_and_every_pic_bit_merge_without_losing_pia(tmp_path: Path) ->
 async def test_pic_bits_are_lsb_first_and_changes_restart_only_that_pack_timer() -> None:
     packs = [Pack(address=1, serial="ONE"), Pack(address=2, serial="TWO")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(
+        Bridge(transport, SeplosV3Decoder(), sink, packs, clock, silent_after_s=120).run()
+    )
     try:
         await settle()
         for address in (1, 2):
             transport.chunks.put_nowait(frame(address))
+            transport.chunks.put_nowait(block(4, bytes(52), address))
             transport.chunks.put_nowait(block(1, bytes(18), address))
         await settle()
+        discard_snapshots(sink)
         clock.advance(4)
         payload = bytearray(18)
         payload[0] = 0x80
@@ -185,7 +197,7 @@ async def test_pic_bits_are_lsb_first_and_changes_restart_only_that_pack_timer()
 async def test_discovery_includes_measurements_and_diagnostic_balancing() -> None:
     packs = [Pack(address=1, serial="PACK")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(), sink, packs, clock).run())
     try:
         await settle()
         components = sink.messages[0][1]["components"]
@@ -228,7 +240,7 @@ async def test_discovery_includes_measurements_and_diagnostic_balancing() -> Non
 async def test_raw_probe_playback_has_all_pib_and_pic_fields_for_both_packs() -> None:
     packs = [Pack(address=1, serial="ONE"), Pack(address=2, serial="TWO")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(), sink, packs, clock).run())
     try:
         await settle()
         raw = await asyncio.to_thread(Path("probe/fixtures/sniff-19200.raw.jsonl").read_text)
@@ -306,22 +318,30 @@ async def test_raw_probe_playback_has_all_pib_and_pic_fields_for_both_packs() ->
 async def test_corrupt_pib_and_pic_cannot_change_snapshot_or_trigger_publication() -> None:
     packs = [Pack(address=1, serial="PACK")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(), sink, packs, clock).run())
     try:
         await settle()
         transport.chunks.put_nowait(frame())
+        transport.chunks.put_nowait(block(4, bytes(52)))
         transport.chunks.put_nowait(block(1, bytes(18)))
         await settle()
+        baseline = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
+        discard_snapshots(sink)
         for function, payload in ((4, bytes([255] * 52)), (1, bytes([255] * 18))):
             corrupt = bytearray(block(function, payload))
             corrupt[-1] ^= 1
             transport.chunks.put_nowait(bytes(corrupt))
         await settle()
         assert not [t for t, _, _ in sink.messages if t.endswith("/state")]
-        clock.advance(10)
+        clock.advance(1)
+        transport.chunks.put_nowait(frame())
+        transport.chunks.put_nowait(block(4, bytes(52)) + block(1, bytes(18)))
+        await settle()
+        clock.advance(9)
         await settle()
         snapshot = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
-        assert "cell_1_voltage" not in snapshot
+        assert snapshot == baseline
+        assert snapshot["cell_1_voltage"] == 0.0
         assert snapshot["cell_1_low_voltage"] is False
         assert snapshot["events"] == 0
     finally:
@@ -335,9 +355,10 @@ async def test_corrupt_pib_and_pic_cannot_change_snapshot_or_trigger_publication
 async def test_each_pic_coil_survives_as_one_lsb_first_flag(active_bit: int) -> None:
     packs = [Pack(address=1, serial="PACK")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(), sink, packs, clock).run())
     try:
         await settle()
+        transport.chunks.put_nowait(frame() + block(4, bytes(52)))
         payload = bytearray(18)
         payload[active_bit // 8] = 1 << (active_bit % 8)
         transport.chunks.put_nowait(block(1, bytes(payload)))

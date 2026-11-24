@@ -15,7 +15,7 @@ from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, frame, 
 async def test_pia_diagnostics_have_vendor_scales_and_discovery() -> None:
     packs = [Pack(address=1, serial="PACK")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(), sink, packs, clock).run())
     try:
         await settle()
         registers = [
@@ -39,6 +39,7 @@ async def test_pia_diagnostics_have_vendor_scales_and_discovery() -> None:
             999,
         ]
         transport.chunks.put_nowait(block(4, struct.pack(">18H", *registers)))
+        transport.chunks.put_nowait(block(4, bytes(52)) + block(1, bytes(18)))
         await settle()
         clock.advance(10)
         await settle()
@@ -94,11 +95,11 @@ async def test_named_events_and_rollups(
 ) -> None:
     packs = [Pack(address=1, serial="PACK")]
     transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
-    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(packs), sink, packs, clock).run())
+    task = asyncio.create_task(Bridge(transport, SeplosV3Decoder(), sink, packs, clock).run())
     try:
         await settle()
         transport.chunks.put_nowait(frame())
-        transport.chunks.put_nowait(block(1, bytes(18)))
+        transport.chunks.put_nowait(block(4, bytes(52)) + block(1, bytes(18)))
         await settle()
         clock.advance(3)
         payload = bytearray(18)
