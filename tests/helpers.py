@@ -5,6 +5,8 @@ import json
 import struct
 from typing import Any
 
+from bms_flux.clock import Clock
+
 
 class ManualClock:
     def __init__(self) -> None:
@@ -37,6 +39,12 @@ class FakeTransport:
 class MemoryMQTT:
     def __init__(self) -> None:
         self.messages: list[tuple[str, Any, bool]] = []
+        self.retained: list[tuple[str, str]] = []
+        self.subscriptions: list[str] = []
+
+    async def read_retained(self, topic_filter: str, clock: Clock) -> list[tuple[str, str]]:
+        self.subscriptions.append(topic_filter)
+        return self.retained.copy()
 
     async def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
         try:
@@ -61,9 +69,19 @@ def block(function: int, payload: bytes, address: int = 1) -> bytes:
     return data + crc.to_bytes(2, "little")
 
 
+def pack_snapshots(sink: MemoryMQTT) -> list[tuple[str, Any, bool]]:
+    """Select pack snapshots, excluding bus and bank state topics."""
+    return [
+        message
+        for message in sink.messages
+        if message[0].endswith("/state") and message[0].split("/")[1] not in ("bus", "bank")
+    ]
+
+
 def discard_snapshots(sink: MemoryMQTT) -> None:
     """Discard startup recovery snapshots before asserting later publications."""
-    sink.messages[:] = [message for message in sink.messages if not message[0].endswith("/state")]
+    snapshots = pack_snapshots(sink)
+    sink.messages[:] = [message for message in sink.messages if message not in snapshots]
 
 
 async def settle() -> None:

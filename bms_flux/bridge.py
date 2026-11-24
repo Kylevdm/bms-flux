@@ -3,6 +3,7 @@
 import asyncio
 import json
 
+from bms_flux.bank import BankPublisher
 from bms_flux.clock import Clock
 from bms_flux.frames import FrameSplitter
 from bms_flux.ha import SnapshotPublisher
@@ -63,14 +64,20 @@ class Bridge:
         self._identity = PackIdentity(packs, silent_after_s)
         self._unmapped: set[int] = set()
         self._lock = asyncio.Lock()
+        self._bank = BankPublisher(sink, clock, self._identity, self._lock, snapshot_interval_s)
         self._publisher = SnapshotPublisher(
             sink, packs, clock, self._identity, self._lock, snapshot_interval_s
         )
 
     async def run(self) -> None:
         stream = ReadingStream()
+        bank_stream = ReadingStream()
         splitter = FrameSplitter()
+        await self._bank.clean_discovery()
         await self._publisher.discover()
+        await self._bank.discover()
+        await self._bank.sync()
+        await self._bank.publish_health()
         await self._sink.publish(
             "bms_flux/unmapped_addresses", json.dumps({"unmapped_addresses": []})
         )
@@ -79,10 +86,15 @@ class Bridge:
         async with asyncio.TaskGroup() as tasks:
             consumer = tasks.create_task(self._publisher.consume(stream))
             publisher = tasks.create_task(self._publisher.publish_snapshots())
+            bank_consumer = tasks.create_task(self._bank.consume(bank_stream))
+            bank_publisher = tasks.create_task(self._bank.publish_snapshots())
             try:
                 while True:
                     data = await self._transport.read()
-                    for frame in splitter.feed(data, final=not data):
+                    frames = splitter.feed(data, final=not data)
+                    self._bank.record_frames(frames, splitter.crc_errors)
+                    await self._bank.publish_health()
+                    for frame in frames:
                         if frame.kind == "resp":
                             async with self._lock:
                                 self._identity.expire(self._clock.now())
@@ -102,11 +114,16 @@ class Bridge:
                                         )
                                     for reading in self._identity.accept(block, self._clock.now()):
                                         await stream.put(reading)
+                                        await bank_stream.put(reading)
                                     await stream.join()
+                                    await bank_stream.join()
                                     await self._publisher.sync_links()
+                                    await self._bank.sync()
                     if not data:
                         await stream.join()
                         break
             finally:
                 consumer.cancel()
                 publisher.cancel()
+                bank_consumer.cancel()
+                bank_publisher.cancel()

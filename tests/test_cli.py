@@ -1,5 +1,7 @@
 """Console wiring uses retained bridge availability and a retained offline LWT."""
 
+import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import TracebackType
 
@@ -24,6 +26,21 @@ async def test_run_sets_retained_offline_lwt_and_publishes_online(
     messages: list[tuple[str, str, bool]] = []
 
     class Client:
+        async def subscribe(self, topic_filter: str) -> None:
+            pass
+
+        async def unsubscribe(self, topic_filter: str) -> None:
+            pass
+
+        @property
+        def messages(self) -> AsyncIterator[aiomqtt.Message]:
+            async def incoming() -> AsyncIterator[aiomqtt.Message]:
+                queue: asyncio.Queue[aiomqtt.Message] = asyncio.Queue()
+                while True:
+                    yield await queue.get()
+
+            return incoming()
+
         async def __aenter__(self) -> "Client":
             return self
 
