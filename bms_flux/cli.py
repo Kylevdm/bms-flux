@@ -54,6 +54,8 @@ async def run() -> None:
                 drift_rested_ocv=settings.drift_rested_ocv,
                 ocv_table=settings.ocv_table,
                 state_dir=settings.state_dir,
+                stream=settings.stream,
+                raw_frames=settings.raw_frames,
             ).run()
         finally:
             transport.close()
