@@ -20,11 +20,12 @@ class Bridge:
         sink: MQTTSink,
         packs: list[Pack],
         clock: Clock,
+        snapshot_interval_s: int = 10,
     ) -> None:
         self._transport = transport
         self._decoder = decoder
         self._clock = clock
-        self._publisher = SnapshotPublisher(sink, packs, clock)
+        self._publisher = SnapshotPublisher(sink, packs, clock, snapshot_interval_s)
 
     async def run(self) -> None:
         stream = ReadingStream()

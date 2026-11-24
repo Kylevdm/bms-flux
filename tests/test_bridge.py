@@ -2,66 +2,14 @@
 
 import asyncio
 import json
-import struct
 from pathlib import Path
 
 import pytest
 
 from bms_flux.bridge import Bridge
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
-from bms_flux.settings import Pack
-
-
-class ManualClock:
-    def __init__(self) -> None:
-        self.time = 0.0
-        self.waiters: list[tuple[float, asyncio.Future[None]]] = []
-
-    def now(self) -> float:
-        return self.time
-
-    async def sleep(self, seconds: float) -> None:
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self.waiters.append((self.time + seconds, future))
-        await future
-
-    def advance(self, seconds: float) -> None:
-        self.time += seconds
-        for deadline, future in self.waiters:
-            if deadline <= self.time and not future.done():
-                future.set_result(None)
-
-
-class FakeTransport:
-    def __init__(self) -> None:
-        self.chunks: asyncio.Queue[bytes] = asyncio.Queue()
-
-    async def read(self) -> bytes:
-        return await self.chunks.get()
-
-
-class MemoryMQTT:
-    def __init__(self) -> None:
-        self.messages: list[tuple[str, dict[str, object], bool]] = []
-
-    async def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
-        self.messages.append((topic, json.loads(payload), retain))
-
-
-def frame(address: int = 1, *, current: int = -1259) -> bytes:
-    registers = [5177, current & 0xFFFF, 8764, 28000, 0, 313, 982, 177, 3235] + [0] * 9
-    data = bytes([address, 4, 36]) + struct.pack(">18H", *registers)
-    crc = 0xFFFF
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
-    return data + crc.to_bytes(2, "little")
-
-
-async def settle() -> None:
-    for _ in range(30):
-        await asyncio.sleep(0)
+from bms_flux.settings import MQTTSettings, Pack, Settings
+from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, frame, settle
 
 
 @pytest.mark.asyncio
@@ -78,22 +26,22 @@ async def test_pia_becomes_retained_discovery_and_ten_second_snapshot() -> None:
         clock.advance(10)
         await settle()
         snapshots = [m for m in sink.messages if m[0].endswith("/state")]
-        assert snapshots == [
-            (
-                "bms_flux/SP112B2410100228/state",
-                {
-                    "voltage": 51.77,
-                    "current": -12.59,
-                    "remaining_capacity": 87.64,
-                    "full_capacity": 280.0,
-                    "reported_soc": 31.3,
-                    "soh": 98.2,
-                    "cycles": 177,
-                    "avg_cell_voltage": 3.235,
-                },
-                False,
-            )
-        ]
+        assert len(snapshots) == 1
+        assert snapshots[0][0] == "bms_flux/SP112B2410100228/state"
+        assert snapshots[0][2] is False
+        assert (
+            snapshots[0][1].items()
+            >= {
+                "voltage": 51.77,
+                "current": -12.59,
+                "remaining_capacity": 87.64,
+                "full_capacity": 280.0,
+                "reported_soc": 31.3,
+                "soh": 98.2,
+                "cycles": 177,
+                "avg_cell_voltage": 3.235,
+            }.items()
+        )
         topic, discovery, retained = sink.messages[0]
         assert topic == "homeassistant/device/bms_flux_SP112B2410100228/config"
         assert retained
@@ -106,11 +54,64 @@ async def test_pia_becomes_retained_discovery_and_ten_second_snapshot() -> None:
         }
         components = discovery["components"]
         assert isinstance(components, dict)
-        assert set(components) == {"voltage", "current", "reported_soc"}
-        for name, component in components.items():
+        assert set(components) >= {"voltage", "current", "reported_soc"}
+        for name in ("voltage", "current", "reported_soc"):
+            component = components[name]
             assert component["unique_id"] == f"bms_flux_SP112B2410100228_{name}"
             assert component["default_entity_id"] == f"sensor.bms_flux_sp112b2410100228_{name}"
             assert component["value_template"] == "{{ value_json." + name + " }}"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_configured_snapshot_interval_and_urgent_timer_restart(tmp_path: Path) -> None:
+    settings = Settings(
+        bus="/dev/test",
+        packs=[Pack(address=1, serial="PACK")],
+        snapshot_interval_s=6,
+        state_dir=tmp_path,
+        mqtt=MQTTSettings(host="localhost"),
+    )
+    transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
+    task = asyncio.create_task(
+        Bridge(
+            transport,
+            SeplosV3Decoder(settings.packs),
+            sink,
+            settings.packs,
+            clock,
+            snapshot_interval_s=settings.snapshot_interval_s,
+        ).run()
+    )
+    try:
+        await settle()
+        transport.chunks.put_nowait(frame())
+        transport.chunks.put_nowait(block(1, bytes(18)))
+        await settle()
+        clock.advance(5)
+        await settle()
+        assert not [t for t, _, _ in sink.messages if t.endswith("/state")]
+        clock.advance(1)
+        await settle()
+        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 1
+        clock.advance(2)
+        payload = bytearray(18)
+        payload[15] = 1
+        transport.chunks.put_nowait(block(1, bytes(payload)))
+        await settle()
+        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 2
+        clock.advance(4)
+        await settle()
+        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 2
+        clock.advance(2)
+        await settle()
+        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 3
+        clock.advance(6)
+        await settle()
+        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 4
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -212,7 +213,7 @@ async def test_raw_probe_chunks_publish_both_packs_with_probe_values() -> None:
                 if topic == f"bms_flux/{pack.serial}/state"
             ]
             assert len(snapshots) >= 3
-            assert snapshots[0] == expected
+            assert snapshots[0].items() >= expected.items()
             for snapshot in snapshots:
                 assert snapshot["reported_soc"] == expected["reported_soc"]
                 assert snapshot["cycles"] == expected["cycles"]

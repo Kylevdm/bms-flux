@@ -3,6 +3,8 @@
 import asyncio
 from dataclasses import dataclass
 
+FieldValue = float | int | str | dict[str, bool]
+
 
 @dataclass(frozen=True)
 class Reading:
@@ -10,7 +12,7 @@ class Reading:
     address: int
     ts: float
     block: str
-    fields: dict[str, float | int]
+    fields: dict[str, FieldValue]
 
 
 class ReadingStream(asyncio.Queue[Reading]):
