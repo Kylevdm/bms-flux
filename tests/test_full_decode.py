@@ -12,6 +12,96 @@ from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import Pack
 from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, frame, settle
 
+PIC_COIL_NAMES = (
+    [f"cell_{i}_low_voltage" for i in range(1, 17)]
+    + [f"cell_{i}_high_voltage" for i in range(1, 17)]
+    + [f"cell_{i}_low_temperature" for i in range(1, 9)]
+    + [f"cell_{i}_high_temperature" for i in range(1, 9)]
+    + [f"cell_{i}_balancing" for i in range(1, 17)]
+    + [
+        "discharge",
+        "charge",
+        "floating_charge",
+        "full_charge",
+        "standby",
+        "turn_off",
+        "bit_70",
+        "bit_71",
+        "cell_high_voltage_alarm",
+        "cell_overvoltage_protection",
+        "cell_low_voltage_alarm",
+        "cell_undervoltage_protection",
+        "pack_high_voltage_alarm",
+        "pack_overvoltage_protection",
+        "pack_low_voltage_alarm",
+        "bit_79",
+        "charge_high_temperature_alarm",
+        "charge_high_temperature_protection",
+        "charge_low_temperature_alarm",
+        "charge_low_temperature_protection",
+        "discharge_high_temperature_alarm",
+        "discharge_high_temperature_protection",
+        "discharge_low_temperature_alarm",
+        "discharge_low_temperature_protection",
+        "ambient_high_temperature_alarm",
+        "ambient_high_temperature_protection",
+        "ambient_low_temperature_alarm",
+        "ambient_low_temperature_protection",
+        "mosfet_high_temperature_alarm",
+        "mosfet_high_temperature_protection",
+        "cell_low_temperature_heating",
+        "bit_95",
+        "charge_current_alarm",
+        "charge_current_protection",
+        "second_level_charge_protection",
+        "discharge_current_alarm",
+        "discharge_current_protection",
+        "second_level_discharge_protection",
+        "output_short_circuit",
+        "bit_103",
+        "short_circuit_latch",
+        "bit_105",
+        "second_level_charge_latch",
+        "second_level_discharge_latch",
+        "bit_108",
+        "bit_109",
+        "bit_110",
+        "bit_111",
+        "bit_112",
+        "bit_113",
+        "soc_alarm",
+        "soc_protection",
+        "cell_difference_alarm",
+        "bit_117",
+        "bit_118",
+        "bit_119",
+        "discharge_fet",
+        "charge_fet",
+        "current_limit_fet",
+        "heating",
+        "bit_124",
+        "bit_125",
+        "bit_126",
+        "bit_127",
+        "low_soc_alarm",
+        "intermittent_charge",
+        "external_switch_control",
+        "static_standby",
+        "history_recording",
+        "under_soc_protection",
+        "active_current_limiting",
+        "passive_current_limiting",
+        "ntc_fault",
+        "afe_fault",
+        "charge_mosfet_fault",
+        "discharge_mosfet_fault",
+        "cell_fault",
+        "break_line_fault",
+        "key_fault",
+        "aerosol_fault",
+    ]
+)
+
 
 @pytest.mark.asyncio
 async def test_pib_and_every_pic_bit_merge_without_losing_pia(tmp_path: Path) -> None:
@@ -36,9 +126,8 @@ async def test_pib_and_every_pic_bit_merge_without_losing_pia(tmp_path: Path) ->
             assert snapshot[f"cell_{cell}_temperature"] == 20.0
         assert snapshot["ambient_temperature"] == 20.0
         assert snapshot["mosfet_temperature"] == 20.0
-        for bit in range(144):
-            if not 48 <= bit < 64:
-                assert snapshot[f"bit_{bit}"] is False
+        for name in PIC_COIL_NAMES:
+            assert snapshot[name] is False
         assert snapshot["balancing_active"] is False
         # The bridge has no persistence dependency for telemetry.
         assert await asyncio.to_thread(lambda: list(tmp_path.iterdir())) == []
@@ -69,9 +158,9 @@ async def test_pic_bits_are_lsb_first_and_changes_restart_only_that_pack_timer()
         snapshots = [(t, p) for t, p, _ in sink.messages if t.endswith("/state")]
         assert len(snapshots) == 1
         assert snapshots[0][0] == "bms_flux/ONE/state"
-        assert snapshots[0][1]["bit_7"] is True
-        assert snapshots[0][1]["bit_0"] is False
-        assert snapshots[0][1]["bit_143"] is True
+        assert snapshots[0][1]["cell_8_low_voltage"] is True
+        assert snapshots[0][1]["cell_1_low_voltage"] is False
+        assert snapshots[0][1]["aerosol_fault"] is True
         assert snapshots[0][1]["cell_1_balancing"] is True
         assert snapshots[0][1]["balancing_active"] is True
         transport.chunks.put_nowait(block(1, bytes(payload)))
@@ -233,7 +322,7 @@ async def test_corrupt_pib_and_pic_cannot_change_snapshot_or_trigger_publication
         await settle()
         snapshot = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
         assert "cell_1_voltage" not in snapshot
-        assert snapshot["bit_0"] is False
+        assert snapshot["cell_1_low_voltage"] is False
         assert snapshot["events"] == 0
     finally:
         task.cancel()
@@ -256,9 +345,15 @@ async def test_each_pic_coil_survives_as_one_lsb_first_flag(active_bit: int) -> 
         clock.advance(10)
         await settle()
         snapshot = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
-        for bit in range(144):
-            name = f"cell_{bit - 47}_balancing" if 48 <= bit < 64 else f"bit_{bit}"
+        assert len(PIC_COIL_NAMES) == len(set(PIC_COIL_NAMES)) == 144
+        for bit, name in enumerate(PIC_COIL_NAMES):
             assert snapshot[name] is (bit == active_bit)
+        coil_fields = {
+            name
+            for name, value in snapshot.items()
+            if isinstance(value, bool) and name not in ("alarm", "protection", "balancing_active")
+        }
+        assert coil_fields == set(PIC_COIL_NAMES)
         assert snapshot["balancing_active"] is (48 <= active_bit < 64)
     finally:
         task.cancel()

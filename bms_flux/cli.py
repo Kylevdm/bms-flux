@@ -43,6 +43,7 @@ async def run() -> None:
                 BrokerSink(client),
                 settings.packs,
                 SystemClock(),
+                snapshot_interval_s=settings.snapshot_interval_s,
             ).run()
         finally:
             transport.close()

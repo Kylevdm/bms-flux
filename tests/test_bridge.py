@@ -8,8 +8,8 @@ import pytest
 
 from bms_flux.bridge import Bridge
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
-from bms_flux.settings import Pack
-from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, frame, settle
+from bms_flux.settings import MQTTSettings, Pack, Settings
+from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, frame, settle
 
 
 @pytest.mark.asyncio
@@ -60,6 +60,58 @@ async def test_pia_becomes_retained_discovery_and_ten_second_snapshot() -> None:
             assert component["unique_id"] == f"bms_flux_SP112B2410100228_{name}"
             assert component["default_entity_id"] == f"sensor.bms_flux_sp112b2410100228_{name}"
             assert component["value_template"] == "{{ value_json." + name + " }}"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_configured_snapshot_interval_and_urgent_timer_restart(tmp_path: Path) -> None:
+    settings = Settings(
+        bus="/dev/test",
+        packs=[Pack(address=1, serial="PACK")],
+        snapshot_interval_s=6,
+        state_dir=tmp_path,
+        mqtt=MQTTSettings(host="localhost"),
+    )
+    transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
+    task = asyncio.create_task(
+        Bridge(
+            transport,
+            SeplosV3Decoder(settings.packs),
+            sink,
+            settings.packs,
+            clock,
+            snapshot_interval_s=settings.snapshot_interval_s,
+        ).run()
+    )
+    try:
+        await settle()
+        transport.chunks.put_nowait(frame())
+        transport.chunks.put_nowait(block(1, bytes(18)))
+        await settle()
+        clock.advance(5)
+        await settle()
+        assert not [t for t, _, _ in sink.messages if t.endswith("/state")]
+        clock.advance(1)
+        await settle()
+        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 1
+        clock.advance(2)
+        payload = bytearray(18)
+        payload[15] = 1
+        transport.chunks.put_nowait(block(1, bytes(payload)))
+        await settle()
+        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 2
+        clock.advance(4)
+        await settle()
+        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 2
+        clock.advance(2)
+        await settle()
+        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 3
+        clock.advance(6)
+        await settle()
+        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 4
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

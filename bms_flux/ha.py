@@ -1,4 +1,4 @@
-"""Publish pack device discovery and ten-second Home Assistant snapshots."""
+"""Publish pack device discovery and interval-based Home Assistant snapshots."""
 
 import json
 
@@ -8,17 +8,18 @@ from bms_flux.protocol.seplos_v3 import SYSTEM_STATES
 from bms_flux.readings import FieldValue, ReadingStream
 from bms_flux.settings import Pack
 
-SNAPSHOT_INTERVAL = 10
-
 
 class SnapshotPublisher:
-    def __init__(self, sink: MQTTSink, packs: list[Pack], clock: Clock) -> None:
+    def __init__(
+        self, sink: MQTTSink, packs: list[Pack], clock: Clock, snapshot_interval_s: int = 10
+    ) -> None:
         self._sink = sink
         self._packs = packs
         self._clock = clock
+        self._snapshot_interval_s = snapshot_interval_s
         self._latest: dict[str, dict[str, FieldValue]] = {}
         self._pic: dict[str, dict[str, FieldValue]] = {}
-        self._deadlines = {pack.serial: clock.now() + SNAPSHOT_INTERVAL for pack in packs}
+        self._deadlines = {pack.serial: clock.now() + snapshot_interval_s for pack in packs}
 
     async def discover(self) -> None:
         for pack in self._packs:
@@ -144,15 +145,17 @@ class SnapshotPublisher:
 
     async def _publish(self, serial: str) -> None:
         await self._sink.publish(f"bms_flux/{serial}/state", json.dumps(self._latest[serial]))
-        self._deadlines[serial] = self._clock.now() + SNAPSHOT_INTERVAL
+        self._deadlines[serial] = self._clock.now() + self._snapshot_interval_s
 
     async def publish_snapshots(self) -> None:
         while True:
-            delay = min(self._deadlines.values(), default=self._clock.now() + SNAPSHOT_INTERVAL)
+            delay = min(
+                self._deadlines.values(), default=self._clock.now() + self._snapshot_interval_s
+            )
             await self._clock.sleep(max(0, delay - self._clock.now()))
             for serial, deadline in self._deadlines.copy().items():
                 if deadline <= self._clock.now():
                     if serial in self._latest:
                         await self._publish(serial)
                     else:
-                        self._deadlines[serial] = self._clock.now() + SNAPSHOT_INTERVAL
+                        self._deadlines[serial] = self._clock.now() + self._snapshot_interval_s

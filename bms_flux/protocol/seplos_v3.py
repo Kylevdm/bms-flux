@@ -128,15 +128,13 @@ class SeplosV3Decoder:
         elif len(frame) == 23 and frame[1:3] == b"\x01\x12":
             block = "PIC"
             fields = {}
-            for bit in range(144):
-                name = f"cell_{bit - 47}_balancing" if 48 <= bit < 64 else f"bit_{bit}"
-                fields[name] = bool(frame[3 + bit // 8] & (1 << (bit % 8)))
             fields["balancing_active"] = bool(frame[9] or frame[10])
             events: dict[str, bool] = {}
             alarm = protection = False
             for bit in range(144):
                 byte, offset = divmod(bit, 8)
                 if 48 <= bit < 64:
+                    fields[f"cell_{bit - 47}_balancing"] = bool(frame[3 + byte] & (1 << offset))
                     continue
                 name = f"bit_{bit}"
                 is_alarm = is_protection = False
