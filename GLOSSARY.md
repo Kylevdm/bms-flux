@@ -99,3 +99,7 @@ _Avoid_: Recalibration, reset, sync
 **Probe**:
 A read-only run that discovers how the bus speaks (protocol, baud rate, which addresses answer) and saves every raw frame.
 _Avoid_: Scan, discovery, test
+
+**Parity check**:
+The acceptance comparison of bms-flux's values against bms_ble's for the same packs, over one unbroken week, testing both that fields decode alike and that bms-flux stays up.
+_Avoid_: Soak test, validation, burn-in
