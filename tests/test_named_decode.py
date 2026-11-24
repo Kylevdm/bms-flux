@@ -8,7 +8,15 @@ import pytest
 from bms_flux.bridge import Bridge
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import Pack
-from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, frame, settle
+from tests.helpers import (
+    FakeTransport,
+    ManualClock,
+    MemoryMQTT,
+    block,
+    frame,
+    pack_snapshots,
+    settle,
+)
 
 
 @pytest.mark.asyncio
@@ -43,7 +51,7 @@ async def test_pia_diagnostics_have_vendor_scales_and_discovery() -> None:
         await settle()
         clock.advance(10)
         await settle()
-        snapshot = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
+        snapshot = pack_snapshots(sink)[-1][1]
         assert (
             snapshot.items()
             >= {
@@ -106,7 +114,7 @@ async def test_named_events_and_rollups(
         payload[byte] = mask
         transport.chunks.put_nowait(block(1, bytes(payload)))
         await settle()
-        snapshot = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
+        snapshot = pack_snapshots(sink)[-1][1]
         assert snapshot[name] is True
         assert snapshot["alarm"] is alarm
         assert snapshot["protection"] is protection

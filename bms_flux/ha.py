@@ -148,6 +148,7 @@ class SnapshotPublisher:
                     "manufacturer": "Seplos",
                     "model": "V3",
                     "serial_number": pack.serial,
+                    "via_device": "bms_flux_bridge",
                 },
                 "origin": {"name": "bms-flux"},
                 "state_topic": f"bms_flux/{pack.serial}/state",
@@ -156,28 +157,6 @@ class SnapshotPublisher:
             await self._sink.publish(
                 f"homeassistant/device/{identifier}/config", json.dumps(payload), retain=True
             )
-
-        await self._sink.publish(
-            "homeassistant/device/bms_flux_bridge/config",
-            json.dumps(
-                {
-                    "device": {"identifiers": ["bms_flux_bridge"], "name": "bms-flux"},
-                    "origin": {"name": "bms-flux"},
-                    "components": {
-                        "unmapped_addresses": {
-                            "platform": "sensor",
-                            "name": "Unmapped addresses",
-                            "unique_id": "bms_flux_unmapped_addresses",
-                            "default_entity_id": "sensor.bms_flux_unmapped_addresses",
-                            "state_topic": "bms_flux/unmapped_addresses",
-                            "value_template": "{{ value_json.unmapped_addresses | join(', ') }}",
-                            "availability": [{"topic": "bms_flux/status"}],
-                        }
-                    },
-                }
-            ),
-            retain=True,
-        )
 
     async def sync_links(self) -> None:
         # Publishing awaits, and time moves on meanwhile: re-expire and repeat until the

@@ -15,6 +15,7 @@ from tests.helpers import (
     block,
     discard_snapshots,
     frame,
+    pack_snapshots,
     settle,
 )
 
@@ -48,7 +49,7 @@ async def test_fet_changes_publish_full_snapshot_and_clear(mask: int, name: str)
         payload[15] = mask
         transport.chunks.put_nowait(block(1, bytes(payload)))
         await settle()
-        snapshots = [p for t, p, _ in sink.messages if t.endswith("/state")]
+        snapshots = [p for _, p, _ in pack_snapshots(sink)]
         assert len(snapshots) == 1
         assert snapshots[0][name] is True
         assert snapshots[0]["cell_16_voltage"] == 3.2
@@ -56,15 +57,15 @@ async def test_fet_changes_publish_full_snapshot_and_clear(mask: int, name: str)
         clock.advance(1)
         transport.chunks.put_nowait(block(1, bytes(18)))
         await settle()
-        snapshots = [p for t, p, _ in sink.messages if t.endswith("/state")]
+        snapshots = [p for _, p, _ in pack_snapshots(sink)]
         assert len(snapshots) == 2
         assert snapshots[-1][name] is False
         clock.advance(7)
         await settle()
-        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 2
+        assert len(pack_snapshots(sink)) == 2
         clock.advance(3)
         await settle()
-        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 3
+        assert len(pack_snapshots(sink)) == 3
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -89,10 +90,10 @@ async def test_balancing_and_mode_changes_do_not_trigger_urgent_snapshot() -> No
         payload[16] = 2
         transport.chunks.put_nowait(block(1, bytes(payload)))
         await settle()
-        assert not [t for t, _, _ in sink.messages if t.endswith("/state")]
+        assert not pack_snapshots(sink)
         clock.advance(10)
         await settle()
-        snapshot = [p for t, p, _ in sink.messages if t.endswith("/state")][-1]
+        snapshot = pack_snapshots(sink)[-1][1]
         assert snapshot["system_state"] == "charge"
         assert snapshot["balancing_active"] is True
         assert snapshot["alarm"] is False

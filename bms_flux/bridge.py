@@ -6,6 +6,7 @@ from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
+from bms_flux.bank import BankPublisher
 from bms_flux.clock import Clock
 from bms_flux.drift.findings import FindingStore
 from bms_flux.drift.full_charge import RULE as FULL_CHARGE_RULE
@@ -89,6 +90,7 @@ class Bridge:
             self._rules[RESTED_OCV_RULE] = RestedOCV(
                 drift_rested_ocv, self._store, self._identity, silent_after_s, ocv_table or []
             )
+        self._bank = BankPublisher(sink, clock, self._identity, self._lock, snapshot_interval_s)
         self._publisher = SnapshotPublisher(
             sink,
             packs,
@@ -102,7 +104,8 @@ class Bridge:
         self._stream_publisher = StreamPublisher(sink, clock, stream=stream, raw_frames=raw_frames)
         # Every consumer of trusted readings gets its own queue (the fan-out).
         self._consumers: list[Callable[[ReadingStream], Coroutine[Any, Any, None]]] = [
-            self._publisher.consume
+            self._publisher.consume,
+            self._bank.consume,
         ]
         self._consumers.extend(rule.consume for rule in self._rules.values())
         if stream:
@@ -119,7 +122,11 @@ class Bridge:
         splitter = FrameSplitter()
         if self._rules:
             await asyncio.to_thread(self._store.load)
+        await self._bank.clean_discovery()
         await self._publisher.discover()
+        await self._bank.discover()
+        await self._bank.sync()
+        await self._bank.publish_health()
         await self.republish_findings()
         await self._sink.publish(
             "bms_flux/unmapped_addresses", json.dumps({"unmapped_addresses": []})
@@ -132,10 +139,14 @@ class Bridge:
                 for consume, queue in zip(self._consumers, queues, strict=True)
             ]
             running.append(tasks.create_task(self._publisher.publish_snapshots()))
+            running.append(tasks.create_task(self._bank.publish_snapshots()))
             try:
                 while True:
                     data = await self._transport.read()
-                    for frame in splitter.feed(data, final=not data):
+                    frames = splitter.feed(data, final=not data)
+                    self._bank.record_frames(frames, splitter.crc_errors)
+                    await self._bank.publish_health()
+                    for frame in frames:
                         if self._raw_frames:
                             await self._stream_publisher.publish_raw(frame.data)
                         if frame.kind == "resp":
@@ -163,6 +174,7 @@ class Bridge:
                                     for queue in queues:
                                         await queue.join()
                                     await self._publisher.sync_links()
+                                    await self._bank.sync()
                     if not data:
                         for queue in queues:
                             await queue.join()

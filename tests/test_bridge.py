@@ -16,6 +16,7 @@ from tests.helpers import (
     block,
     discard_snapshots,
     frame,
+    pack_snapshots,
     settle,
 )
 
@@ -30,13 +31,13 @@ async def test_pia_becomes_retained_discovery_and_ten_second_snapshot() -> None:
         await settle()
         transport.chunks.put_nowait(frame())
         await settle()
-        assert not [m for m in sink.messages if m[0].endswith("/state")]
+        assert not pack_snapshots(sink)
         transport.chunks.put_nowait(block(4, bytes(52)) + block(1, bytes(18)))
         await settle()
         discard_snapshots(sink)
         clock.advance(10)
         await settle()
-        snapshots = [m for m in sink.messages if m[0].endswith("/state")]
+        snapshots = pack_snapshots(sink)
         assert len(snapshots) == 1
         assert snapshots[0][0] == "bms_flux/SP112B2410100228/state"
         assert snapshots[0][2] is False
@@ -62,6 +63,7 @@ async def test_pia_becomes_retained_discovery_and_ten_second_snapshot() -> None:
             "manufacturer": "Seplos",
             "model": "V3",
             "serial_number": "SP112B2410100228",
+            "via_device": "bms_flux_bridge",
         }
         components = discovery["components"]
         assert isinstance(components, dict)
@@ -106,25 +108,25 @@ async def test_configured_snapshot_interval_and_urgent_timer_restart(tmp_path: P
         discard_snapshots(sink)
         clock.advance(5)
         await settle()
-        assert not [t for t, _, _ in sink.messages if t.endswith("/state")]
+        assert not pack_snapshots(sink)
         clock.advance(1)
         await settle()
-        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 1
+        assert len(pack_snapshots(sink)) == 1
         clock.advance(2)
         payload = bytearray(18)
         payload[15] = 1
         transport.chunks.put_nowait(block(1, bytes(payload)))
         await settle()
-        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 2
+        assert len(pack_snapshots(sink)) == 2
         clock.advance(4)
         await settle()
-        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 2
+        assert len(pack_snapshots(sink)) == 2
         clock.advance(2)
         await settle()
-        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 3
+        assert len(pack_snapshots(sink)) == 3
         clock.advance(6)
         await settle()
-        assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) == 4
+        assert len(pack_snapshots(sink)) == 4
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -147,7 +149,7 @@ async def test_bad_crc_and_incomplete_junk_resync_without_publishing_unmapped_pa
         await settle()
         clock.advance(10)
         await settle()
-        assert not [m for m in sink.messages if m[0].endswith("/state")]
+        assert not pack_snapshots(sink)
         # A plausible but incomplete response in noise must not hide a later valid frame.
         transport.chunks.put_nowait(b"\x01\x04\xfa" + frame(current=425)[:7])
         await settle()
@@ -157,13 +159,13 @@ async def test_bad_crc_and_incomplete_junk_resync_without_publishing_unmapped_pa
         discard_snapshots(sink)
         clock.advance(10)
         await settle()
-        snapshots = [m for m in sink.messages if m[0].endswith("/state")]
+        snapshots = pack_snapshots(sink)
         assert len(snapshots) == 1
         assert snapshots[0][1]["current"] == 4.25
         assert all("SP18B2311040070" not in topic for topic, _, _ in sink.messages)
         clock.advance(10)
         await settle()
-        assert len([m for m in sink.messages if m[0].endswith("/state")]) == 2
+        assert len(pack_snapshots(sink)) == 2
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
