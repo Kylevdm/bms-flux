@@ -8,14 +8,17 @@ from typing import Any
 
 from bms_flux.clock import Clock
 from bms_flux.drift.findings import FindingStore
-from bms_flux.drift.full_charge import RULE, FullCharge
+from bms_flux.drift.full_charge import RULE as FULL_CHARGE_RULE
+from bms_flux.drift.full_charge import FullCharge
+from bms_flux.drift.rested_ocv import RULE as RESTED_OCV_RULE
+from bms_flux.drift.rested_ocv import RestedOCV
 from bms_flux.frames import FrameSplitter
 from bms_flux.ha import SnapshotPublisher
 from bms_flux.identity import PackIdentity
 from bms_flux.mqtt import MQTTSink
 from bms_flux.protocol import ProtocolDecoder
 from bms_flux.readings import DecodedBlock, ReadingStream
-from bms_flux.settings import DriftFullCharge, Pack
+from bms_flux.settings import DriftFullCharge, DriftRestedOCV, OCVPoint, Pack
 from bms_flux.stream import StreamPublisher
 from bms_flux.transport import ReadTransport
 
@@ -63,6 +66,8 @@ class Bridge:
         silent_after_s: int = 10,
         drift_full_charge: DriftFullCharge | None = None,
         state_dir: Path = Path("state"),
+        drift_rested_ocv: DriftRestedOCV | None = None,
+        ocv_table: list[OCVPoint] | None = None,
         stream: bool = True,
         raw_frames: bool = False,
     ) -> None:
@@ -75,11 +80,15 @@ class Bridge:
         self._lock = asyncio.Lock()
         self._packs = packs
         self._store = FindingStore(state_dir, sink)
-        self._full_charge = (
-            FullCharge(drift_full_charge, self._store, self._identity, silent_after_s)
-            if drift_full_charge is not None and drift_full_charge.enabled
-            else None
-        )
+        self._rules: dict[str, FullCharge | RestedOCV] = {}
+        if drift_full_charge is not None and drift_full_charge.enabled:
+            self._rules[FULL_CHARGE_RULE] = FullCharge(
+                drift_full_charge, self._store, self._identity, silent_after_s
+            )
+        if drift_rested_ocv is not None and drift_rested_ocv.enabled:
+            self._rules[RESTED_OCV_RULE] = RestedOCV(
+                drift_rested_ocv, self._store, self._identity, silent_after_s, ocv_table or []
+            )
         self._publisher = SnapshotPublisher(
             sink,
             packs,
@@ -87,7 +96,7 @@ class Bridge:
             self._identity,
             self._lock,
             snapshot_interval_s,
-            finding_rules=[RULE] if self._full_charge is not None else [],
+            finding_rules=list(self._rules),
         )
         self._raw_frames = raw_frames
         self._stream_publisher = StreamPublisher(sink, clock, stream=stream, raw_frames=raw_frames)
@@ -95,21 +104,20 @@ class Bridge:
         self._consumers: list[Callable[[ReadingStream], Coroutine[Any, Any, None]]] = [
             self._publisher.consume
         ]
-        if self._full_charge is not None:
-            self._consumers.append(self._full_charge.consume)
+        self._consumers.extend(rule.consume for rule in self._rules.values())
         if stream:
             self._consumers.append(self._stream_publisher.consume)
 
     async def republish_findings(self) -> None:
         """Republish all configured finding states after broker reconnect."""
-        if self._full_charge is not None:
+        for rule in self._rules:
             for pack in self._packs:
-                await self._store.publish(RULE, pack.serial)
+                await self._store.publish(rule, pack.serial)
 
     async def run(self) -> None:
         queues = [ReadingStream() for _ in self._consumers]
         splitter = FrameSplitter()
-        if self._full_charge is not None:
+        if self._rules:
             await asyncio.to_thread(self._store.load)
         await self._publisher.discover()
         await self.republish_findings()
@@ -134,8 +142,8 @@ class Bridge:
                             async with self._lock:
                                 self._identity.expire(self._clock.now())
                                 await self._publisher.sync_links()
-                                if self._full_charge is not None:
-                                    self._full_charge.reset_unavailable()
+                                for rule in self._rules.values():
+                                    rule.reset_unavailable()
                                 block = self._decoder.decode(frame.data, self._clock.now())
                                 if block is not None:
                                     if (
