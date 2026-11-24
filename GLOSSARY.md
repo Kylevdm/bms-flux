@@ -67,16 +67,24 @@ The gap between a pack's reported SoC and its true state of charge, which the BM
 _Avoid_: Error, offset, miscalibration
 
 **Drift rule**:
-One named test of independent evidence that a pack's reported SoC has drifted.
+One named test of independent evidence that reported SoC has drifted, in one pack or somewhere in the bank.
 _Avoid_: Check, detector, alarm
 
 **Drift finding**:
-A drift rule's verdict that a pack has drifted, together with its evidence. A finding never corrects anything.
+A drift rule's verdict that reported SoC has drifted, together with its evidence. An anchor finding names one pack; a divergence finding names the bank, because it cannot tell which pack drifted. A finding never corrects anything.
 _Avoid_: Alert, correction, warning
+
+**Divergence**:
+Packs in one bank reporting SoCs further apart than parallel packs can truly be. Evidence that some pack has drifted, but not which.
+_Avoid_: Imbalance, mismatch
 
 **Anchor**:
 A battery condition whose true state of charge is known independently of the BMS (full charge, or rested open-circuit voltage near the ends).
 _Avoid_: Reference point, calibration point
+
+**Latched finding**:
+A drift finding that stays raised after its evidence has passed, until the same rule reaches its anchor again and finds agreement.
+_Avoid_: Sticky alert, persistent alarm
 
 **SoC correction**:
 An owner-commanded write that sets a pack's reported SoC. Not part of V1.
