@@ -6,6 +6,10 @@ bms-flux owns the RS485 link to a bank of Seplos battery packs and reports their
 
 ### Hardware
 
+**Bank**:
+All the packs on one bus, wired in parallel and reported on together.
+_Avoid_: Group, array, system
+
 **Pack**:
 One Seplos battery with its own BMS and serial number. A bank holds several packs wired in parallel.
 _Avoid_: Battery, BMS, module
@@ -13,6 +17,10 @@ _Avoid_: Battery, BMS, module
 **Pack serial**:
 The serial number a pack's BMS reports (e.g. `SP18B2311040070`). It is the pack's identity; bus addresses are not.
 _Avoid_: Pack ID, device ID
+
+**Pack label**:
+The owner's display name for a pack (e.g. "Pack A"). It never identifies the pack; the pack serial does.
+_Avoid_: Name, alias
 
 **Bus**:
 The daisy-chained RS485 link that joins the packs and the adapter.
@@ -37,6 +45,16 @@ _Avoid_: Sample, message, frame
 **Transport**:
 The way bms-flux reaches the bus: a local serial adapter, or a network gateway that carries the bus over TCP.
 _Avoid_: Connection, link
+
+### Reporting
+
+**Snapshot**:
+The latest reading of each pack, published to Home Assistant on an interval or as soon as an alarm, protection or FET state changes.
+_Avoid_: Sample, update, poll
+
+**Link state**:
+Whether bms-flux can currently vouch for a pack's readings, and if not, why (the pack has gone silent, or its fingerprint no longer matches).
+_Avoid_: Status, connection
 
 ### State of charge
 
