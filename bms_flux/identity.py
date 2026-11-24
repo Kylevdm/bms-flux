@@ -23,6 +23,10 @@ class PackIdentity:
         self._blocks: dict[str, dict[str, Reading]] = {pack.serial: {} for pack in packs}
         self._fingerprints: dict[str, tuple[float, float]] = {}
 
+    def readings(self, serial: str) -> tuple[Reading, ...]:
+        """Return the latest accepted blocks, including those of a silent pack."""
+        return tuple(self._blocks[serial].values())
+
     def next_expiry(self, now: float) -> float:
         return min(
             (
