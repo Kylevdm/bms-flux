@@ -52,7 +52,9 @@ async def test_run_sets_retained_offline_lwt_and_publishes_online(
         ) -> None:
             pass
 
-        async def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
+        async def publish(
+            self, topic: str, payload: str, *, retain: bool = False, qos: int = 0
+        ) -> None:
             messages.append((topic, payload, retain))
 
     class Transport(FakeTransport):

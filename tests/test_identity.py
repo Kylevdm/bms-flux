@@ -249,10 +249,12 @@ class StallingMQTT(MemoryMQTT):
         super().__init__()
         self._clock = clock
 
-    async def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
+    async def publish(
+        self, topic: str, payload: str, *, retain: bool = False, qos: int = 0
+    ) -> None:
         if topic.endswith("/availability") and payload == "online":
             self._clock.advance(11)
-        await super().publish(topic, payload, retain=retain)
+        await super().publish(topic, payload, retain=retain, qos=qos)
 
 
 @pytest.mark.asyncio

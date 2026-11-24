@@ -15,7 +15,9 @@ from bms_flux.clock import Clock
 class MQTTSink(Protocol):
     async def read_retained(self, topic_filter: str, clock: Clock) -> list[tuple[str, str]]: ...
 
-    async def publish(self, topic: str, payload: str, *, retain: bool = False) -> None: ...
+    async def publish(
+        self, topic: str, payload: str, *, retain: bool = False, qos: int = 0
+    ) -> None: ...
 
 
 class BrokerSink:
@@ -50,5 +52,7 @@ class BrokerSink:
             await self._client.unsubscribe(topic_filter)
         return retained
 
-    async def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
-        await self._client.publish(topic, payload, retain=retain)
+    async def publish(
+        self, topic: str, payload: str, *, retain: bool = False, qos: int = 0
+    ) -> None:
+        await self._client.publish(topic, payload, qos=qos, retain=retain)

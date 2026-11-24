@@ -41,17 +41,21 @@ class MemoryMQTT:
         self.messages: list[tuple[str, Any, bool]] = []
         self.retained: list[tuple[str, str]] = []
         self.subscriptions: list[str] = []
+        self.qos: list[int] = []
 
     async def read_retained(self, topic_filter: str, clock: Clock) -> list[tuple[str, str]]:
         self.subscriptions.append(topic_filter)
         return self.retained.copy()
 
-    async def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
+    async def publish(
+        self, topic: str, payload: str, *, retain: bool = False, qos: int = 0
+    ) -> None:
         try:
             decoded = json.loads(payload)
         except json.JSONDecodeError:
             decoded = payload
         self.messages.append((topic, decoded, retain))
+        self.qos.append(qos)
 
 
 def frame(address: int = 1, *, current: int = -1259) -> bytes:

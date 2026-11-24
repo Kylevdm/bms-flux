@@ -35,8 +35,10 @@ async def test_retained_collection_waits_one_clock_second_before_cleanup() -> No
 
             return messages()
 
-        async def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
-            await sink.publish(topic, payload, retain=retain)
+        async def publish(
+            self, topic: str, payload: str, *, qos: int = 0, retain: bool = False
+        ) -> None:
+            await sink.publish(topic, payload, retain=retain, qos=qos)
 
     task = asyncio.create_task(
         Bridge(

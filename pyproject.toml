@@ -32,14 +32,14 @@ bms-flux = "bms_flux.cli:main"
 include = ["bms_flux*"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = [".", "tools"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.mypy]
 strict = true
-packages = ["bms_flux", "tests"]
+packages = ["bms_flux", "tests", "tools"]
 
 [tool.ruff]
 # The recorded probe and its reference capture script are read-only artifacts.
