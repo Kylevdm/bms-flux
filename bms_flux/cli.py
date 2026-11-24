@@ -5,7 +5,6 @@ import asyncio
 from contextlib import suppress
 
 import aiomqtt
-import yaml
 from pydantic import ValidationError
 
 from bms_flux.bridge import Bridge
@@ -23,10 +22,12 @@ class ConfigurationError(Exception):
 async def run() -> None:
     try:
         settings = await asyncio.to_thread(load_settings)
-    except (ValidationError, yaml.YAMLError, OSError, KeyError):
-        raise ConfigurationError(
-            "cannot load configuration; check BMS_FLUX_CONFIG and YAML"
-        ) from None
+    except ValidationError as error:
+        problems = "\n".join(
+            f"  {'.'.join(map(str, problem['loc']))}: {problem['msg']}"
+            for problem in error.errors(include_input=False, include_url=False)
+        )
+        raise ConfigurationError(f"invalid configuration:\n{problems}") from None
     mqtt = settings.mqtt
     async with aiomqtt.Client(
         hostname=mqtt.host,
