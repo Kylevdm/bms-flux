@@ -35,12 +35,15 @@ include = ["bms_flux*"]
 pythonpath = ["."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.mypy]
 strict = true
 packages = ["bms_flux", "tests"]
 
 [tool.ruff]
+# The recorded probe and its reference capture script are read-only artifacts.
+extend-exclude = ["probe/"]
 target-version = "py311"
 line-length = 100
 
