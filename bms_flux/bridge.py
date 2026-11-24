@@ -168,8 +168,8 @@ class Bridge:
             try:
                 await operation()
                 return
-            except Exception:
-                _LOG.exception("Consumer failed; contained")
+            except Exception as error:
+                _LOG.exception("Consumer failed (%s)", type(error).__name__)
                 if queue is not None:
                     if not queue.active:
                         await queue.get()
@@ -222,8 +222,10 @@ class Bridge:
                                 for rule in self._rules.values():
                                     try:
                                         rule.reset_unavailable()
-                                    except Exception:
-                                        _LOG.exception("Drift rule failed; contained")
+                                    except Exception as error:
+                                        _LOG.exception(
+                                            "Drift rule failed (%s)", type(error).__name__
+                                        )
                                 block = self._decoder.decode(frame.data, self._clock.now())
                                 if block is not None:
                                     if (
