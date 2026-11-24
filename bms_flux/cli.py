@@ -7,6 +7,7 @@ from contextlib import suppress
 import aiomqtt
 from pydantic import ValidationError
 
+from bms_flux import addon
 from bms_flux.bridge import Bridge, probe_blocks
 from bms_flux.clock import Clock, SystemClock
 from bms_flux.mqtt import BrokerSink
@@ -21,7 +22,10 @@ class ConfigurationError(Exception):
 
 async def run() -> None:
     try:
-        settings = await asyncio.to_thread(load_settings)
+        if addon.is_addon_mode():
+            settings = await asyncio.to_thread(addon.load_addon_settings)
+        else:
+            settings = await asyncio.to_thread(load_settings)
     except ValidationError as error:
         problems = "\n".join(
             f"  {'.'.join(map(str, problem['loc']))}: {problem['msg']}"

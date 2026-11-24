@@ -327,14 +327,16 @@ class Settings(BaseSettings):
         return result
 
 
-def load_settings(*, options_path: Path = Path("/data/options.json")) -> Settings:
+def load_settings(
+    *, options_path: Path = Path("/data/options.json"), **init_kwargs: Any
+) -> Settings:
     token = _options_path.set(options_path)
     errors: list[InitErrorDetails] = []
     error_token = _source_errors.set(errors)
     try:
         settings: Settings | None = None
         try:
-            settings = Settings(**{})
+            settings = Settings(**init_kwargs)
         except ValidationError as error:
             errors.extend(_validation_details(error))
         if errors:
