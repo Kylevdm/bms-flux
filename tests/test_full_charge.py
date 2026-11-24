@@ -71,8 +71,6 @@ async def running(
         async with asyncio.timeout(2):
             await transport.ready.wait()
         yield bridge, transport, sink, clock
-        transport.chunks.put_nowait(b"")
-        await task
     finally:
         if not task.done():
             task.cancel()
@@ -102,9 +100,6 @@ async def test_full_charge_hold_evidence_and_bridge_availability(tmp_path: Path)
         await play(transport, clock, 55)
         assert states(sink)[-1]["active"] is False
         await play(transport, clock, 5)
-        # Wait for the consumer's atomic state-file write before checking publications.
-        transport.chunks.put_nowait(b"")
-        await settle()
     assert states(sink)[-1] == {
         "active": True,
         "anchor_soc": 100.0,

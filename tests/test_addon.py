@@ -218,7 +218,7 @@ async def test_cli_run_uses_addon_settings_in_supervisor_mode(
     async def fake_open(bus: str) -> FakeTransport:
         return FakeTransport()
 
-    monkeypatch.setattr("bms_flux.cli.SerialTransport.open", staticmethod(fake_open))
+    monkeypatch.setattr("bms_flux.transport.SerialTransport.open", staticmethod(fake_open))
 
     class FakeBridge:
         api = None

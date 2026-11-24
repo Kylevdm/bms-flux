@@ -62,8 +62,6 @@ async def running(
         async with asyncio.timeout(2):
             await transport.ready.wait()
         yield bridge, transport, sink, clock
-        transport.chunks.put_nowait(b"")
-        await task
     finally:
         if not task.done():
             task.cancel()

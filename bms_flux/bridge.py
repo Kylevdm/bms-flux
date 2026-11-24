@@ -24,7 +24,7 @@ from bms_flux.protocol import ProtocolDecoder
 from bms_flux.readings import DecodedBlock, Reading, ReadingStream
 from bms_flux.settings import DriftFullCharge, DriftRestedOCV, OCVPoint, Pack
 from bms_flux.stream import StreamPublisher
-from bms_flux.transport import ReadTransport
+from bms_flux.transport import BusState, ReadTransport
 
 
 async def probe_blocks(
@@ -93,6 +93,7 @@ class Bridge:
         stream: bool = True,
         raw_frames: bool = False,
         api_token: str = "",
+        bus_state: Callable[[], BusState] = lambda: "connected",
     ) -> None:
         self._transport = transport
         self._decoder = decoder
@@ -115,7 +116,9 @@ class Bridge:
             self._rules[RESTED_OCV_RULE] = RestedOCV(
                 drift_rested_ocv, self._store, self._identity, silent_after_s, ocv_table or []
             )
-        self._bank = BankPublisher(sink, clock, self._identity, self._lock, snapshot_interval_s)
+        self._bank = BankPublisher(
+            sink, clock, self._identity, self._lock, snapshot_interval_s, bus_state
+        )
         self._publisher = SnapshotPublisher(
             sink,
             packs,
@@ -211,7 +214,9 @@ class Bridge:
             try:
                 while True:
                     data = await self._transport.read()
-                    frames = splitter.feed(data, final=not data)
+                    if not data:
+                        raise ConnectionError("unsupervised transport closed")
+                    frames = splitter.feed(data)
                     self._bank.record_frames(frames, splitter.crc_errors)
                     await self._contain(self._bank.publish_health, restart=False)
                     for frame in frames:
@@ -254,10 +259,6 @@ class Bridge:
                                         await queue.join()
                                     await self._contain(self._publisher.sync_links, restart=False)
                                     await self._contain(self._bank.sync, restart=False)
-                    if not data:
-                        for queue in queues:
-                            await queue.join()
-                        break
             finally:
                 for task in running:
                     task.cancel()

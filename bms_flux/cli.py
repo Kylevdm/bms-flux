@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 
@@ -15,7 +16,7 @@ from bms_flux.clock import Clock, SystemClock
 from bms_flux.mqtt import BrokerConnection, BrokerSink, ReconnectingSink
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import load_settings
-from bms_flux.transport import SerialTransport
+from bms_flux.transport import SupervisedTransport
 
 
 class ConfigurationError(Exception):
@@ -48,7 +49,7 @@ async def run() -> None:
             yield BrokerSink(client)
 
     clock = SystemClock()
-    transport = await SerialTransport.open(settings.bus)
+    transport = SupervisedTransport(settings.bus, clock)
     try:
         bridge = Bridge(
             transport,
@@ -65,6 +66,7 @@ async def run() -> None:
             stream=settings.stream,
             raw_frames=settings.raw_frames,
             api_token=settings.api_token.get_secret_value(),
+            bus_state=lambda: transport.state,
         )
         async with AsyncExitStack() as stack:
             if bridge.api is not None:
@@ -78,9 +80,10 @@ async def run() -> None:
 
 
 async def probe(bus: str, seconds: int = 10, *, clock: Clock | None = None) -> None:
-    transport = await SerialTransport.open(bus)
+    clock = clock or SystemClock()
+    transport = SupervisedTransport(bus, clock)
     try:
-        heard = await probe_blocks(transport, SeplosV3Decoder(), clock or SystemClock(), seconds)
+        heard = await probe_blocks(transport, SeplosV3Decoder(), clock, seconds)
         for address, block in sorted(heard.items()):
             cycles = block.fields.get("cycles", "unknown")
             soc = block.fields.get("reported_soc")
@@ -91,6 +94,7 @@ async def probe(bus: str, seconds: int = 10, *, clock: Clock | None = None) -> N
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(prog="bms-flux")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("run")
