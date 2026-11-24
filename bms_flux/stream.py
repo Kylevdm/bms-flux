@@ -68,9 +68,11 @@ class StreamPublisher:
             )
             stream.task_done()
 
-    async def publish_raw(self, frame: bytes) -> None:
+    async def publish_raw(self, frame: bytes, *, ts: float | None = None) -> None:
         """Publish a single CRC-valid raw frame, including requests."""
         if not self._raw_frames:
             return
-        payload = json.dumps(format_raw_frame(frame[0], frame, self._clock.now()))
+        payload = json.dumps(
+            format_raw_frame(frame[0], frame, self._clock.now() if ts is None else ts)
+        )
         await self._sink.publish("bms_flux/raw", payload, retain=False, qos=0)

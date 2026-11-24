@@ -183,6 +183,14 @@ class BankPublisher:
                 self._latest[reading.serial] = reading.fields
             stream.task_done()
 
+    async def republish(self) -> None:
+        """Restore bank availability, snapshot and bus health after reconnect."""
+        self._available = None
+        self._deadline = self._clock.now()
+        self._health_deadline = self._clock.now()
+        await self.sync()
+        await self.publish_health()
+
     async def sync(self) -> None:
         self._identity.expire(self._clock.now())
         available = bool(self._identity.links) and all(
