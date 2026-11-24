@@ -1,0 +1,21 @@
+services:
+  bms-flux:
+    build:
+      context: .
+      dockerfile: bms_flux_addon/Dockerfile
+      args:
+        BUILD_VERSION: "0.1.0"
+    restart: unless-stopped
+    devices:
+      - /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0:/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+    environment:
+      BMS_FLUX_CONFIG: /config/bms-flux.yaml
+      BMS_FLUX_STATE_DIR: /data
+    volumes:
+      - ./config:/config:ro
+      - ./state:/data
+    # The local API is not mapped to the host by default. Uncomment and set the
+    # host IP if a LAN app needs it; other containers reach the service on the
+    # compose network at http://bms-flux:8765.
+    # ports:
+    #   - "127.0.0.1:8765:8765"
