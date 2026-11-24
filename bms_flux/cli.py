@@ -52,6 +52,8 @@ async def run() -> None:
                 silent_after_s=settings.silent_after_s,
                 drift_full_charge=settings.drift_full_charge,
                 state_dir=settings.state_dir,
+                stream=settings.stream,
+                raw_frames=settings.raw_frames,
             ).run()
         finally:
             transport.close()

@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import Any
 
 from bms_flux.clock import Clock
 from bms_flux.drift.findings import FindingStore
@@ -14,6 +16,7 @@ from bms_flux.mqtt import MQTTSink
 from bms_flux.protocol import ProtocolDecoder
 from bms_flux.readings import DecodedBlock, ReadingStream
 from bms_flux.settings import DriftFullCharge, Pack
+from bms_flux.stream import StreamPublisher
 from bms_flux.transport import ReadTransport
 
 
@@ -60,6 +63,8 @@ class Bridge:
         silent_after_s: int = 10,
         drift_full_charge: DriftFullCharge | None = None,
         state_dir: Path = Path("state"),
+        stream: bool = True,
+        raw_frames: bool = False,
     ) -> None:
         self._transport = transport
         self._decoder = decoder
@@ -84,6 +89,16 @@ class Bridge:
             snapshot_interval_s,
             finding_rules=[RULE] if self._full_charge is not None else [],
         )
+        self._raw_frames = raw_frames
+        self._stream_publisher = StreamPublisher(sink, clock, stream=stream, raw_frames=raw_frames)
+        # Every consumer of trusted readings gets its own queue (the fan-out).
+        self._consumers: list[Callable[[ReadingStream], Coroutine[Any, Any, None]]] = [
+            self._publisher.consume
+        ]
+        if self._full_charge is not None:
+            self._consumers.append(self._full_charge.consume)
+        if stream:
+            self._consumers.append(self._stream_publisher.consume)
 
     async def republish_findings(self) -> None:
         """Republish all configured finding states after broker reconnect."""
@@ -92,9 +107,8 @@ class Bridge:
                 await self._store.publish(RULE, pack.serial)
 
     async def run(self) -> None:
-        stream = ReadingStream()
+        queues = [ReadingStream() for _ in self._consumers]
         splitter = FrameSplitter()
-        finding_stream = ReadingStream()
         if self._full_charge is not None:
             await asyncio.to_thread(self._store.load)
         await self._publisher.discover()
@@ -105,17 +119,17 @@ class Bridge:
         await self._publisher.sync_links()
         await self._sink.publish("bms_flux/status", "online", retain=True)
         async with asyncio.TaskGroup() as tasks:
-            consumer = tasks.create_task(self._publisher.consume(stream))
-            publisher = tasks.create_task(self._publisher.publish_snapshots())
-            findings = (
-                tasks.create_task(self._full_charge.consume(finding_stream))
-                if self._full_charge is not None
-                else None
-            )
+            running: list[asyncio.Task[None]] = [
+                tasks.create_task(consume(queue))
+                for consume, queue in zip(self._consumers, queues, strict=True)
+            ]
+            running.append(tasks.create_task(self._publisher.publish_snapshots()))
             try:
                 while True:
                     data = await self._transport.read()
                     for frame in splitter.feed(data, final=not data):
+                        if self._raw_frames:
+                            await self._stream_publisher.publish_raw(frame.data)
                         if frame.kind == "resp":
                             async with self._lock:
                                 self._identity.expire(self._clock.now())
@@ -136,17 +150,15 @@ class Bridge:
                                             ),
                                         )
                                     for reading in self._identity.accept(block, self._clock.now()):
-                                        await stream.put(reading)
-                                        if findings is not None:
-                                            await finding_stream.put(reading)
-                                    await stream.join()
-                                    await finding_stream.join()
+                                        for queue in queues:
+                                            await queue.put(reading)
+                                    for queue in queues:
+                                        await queue.join()
                                     await self._publisher.sync_links()
                     if not data:
-                        await stream.join()
+                        for queue in queues:
+                            await queue.join()
                         break
             finally:
-                consumer.cancel()
-                publisher.cancel()
-                if findings is not None:
-                    findings.cancel()
+                for task in running:
+                    task.cancel()
