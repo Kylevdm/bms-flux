@@ -2,7 +2,8 @@
 
 import argparse
 import asyncio
-from contextlib import suppress
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 
 import aiomqtt
 from pydantic import ValidationError
@@ -10,7 +11,7 @@ from pydantic import ValidationError
 from bms_flux import addon
 from bms_flux.bridge import Bridge, probe_blocks
 from bms_flux.clock import Clock, SystemClock
-from bms_flux.mqtt import BrokerSink
+from bms_flux.mqtt import BrokerConnection, BrokerSink, ReconnectingSink
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import load_settings
 from bms_flux.transport import SerialTransport
@@ -33,32 +34,38 @@ async def run() -> None:
         )
         raise ConfigurationError(f"invalid configuration:\n{problems}") from None
     mqtt = settings.mqtt
-    async with aiomqtt.Client(
-        hostname=mqtt.host,
-        port=mqtt.port,
-        username=mqtt.username,
-        password=mqtt.password.get_secret_value() if mqtt.password else None,
-        will=aiomqtt.Will("bms_flux/status", "offline", retain=True),
-    ) as client:
-        transport = await SerialTransport.open(settings.bus)
-        try:
-            await Bridge(
-                transport,
-                SeplosV3Decoder(),
-                BrokerSink(client),
-                settings.packs,
-                SystemClock(),
-                snapshot_interval_s=settings.snapshot_interval_s,
-                silent_after_s=settings.silent_after_s,
-                drift_full_charge=settings.drift_full_charge,
-                drift_rested_ocv=settings.drift_rested_ocv,
-                ocv_table=settings.ocv_table,
-                state_dir=settings.state_dir,
-                stream=settings.stream,
-                raw_frames=settings.raw_frames,
-            ).run()
-        finally:
-            transport.close()
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BrokerConnection]:
+        async with aiomqtt.Client(
+            hostname=mqtt.host,
+            port=mqtt.port,
+            username=mqtt.username,
+            password=mqtt.password.get_secret_value() if mqtt.password else None,
+            will=aiomqtt.Will("bms_flux/status", "offline", retain=True),
+        ) as client:
+            yield BrokerSink(client)
+
+    clock = SystemClock()
+    transport = await SerialTransport.open(settings.bus)
+    try:
+        await Bridge(
+            transport,
+            SeplosV3Decoder(),
+            ReconnectingSink(connect, clock),
+            settings.packs,
+            clock,
+            snapshot_interval_s=settings.snapshot_interval_s,
+            silent_after_s=settings.silent_after_s,
+            drift_full_charge=settings.drift_full_charge,
+            drift_rested_ocv=settings.drift_rested_ocv,
+            ocv_table=settings.ocv_table,
+            state_dir=settings.state_dir,
+            stream=settings.stream,
+            raw_frames=settings.raw_frames,
+        ).run()
+    finally:
+        transport.close()
 
 
 async def probe(bus: str, seconds: int = 10, *, clock: Clock | None = None) -> None:
@@ -91,3 +98,5 @@ def main() -> None:
             asyncio.run(probe(args.bus, args.seconds) if args.command == "probe" else run())
         except ConfigurationError as error:
             parser.exit(2, f"bms-flux: {error}\n")
+        except Exception:
+            parser.exit(1, "bms-flux: unexpected core fault\n")
