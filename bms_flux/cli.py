@@ -2,9 +2,10 @@
 
 import argparse
 import asyncio
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 
 import aiomqtt
+from aiohttp import web
 from pydantic import ValidationError
 
 from bms_flux import addon
@@ -42,7 +43,7 @@ async def run() -> None:
     ) as client:
         transport = await SerialTransport.open(settings.bus)
         try:
-            await Bridge(
+            bridge = Bridge(
                 transport,
                 SeplosV3Decoder(),
                 BrokerSink(client),
@@ -54,7 +55,15 @@ async def run() -> None:
                 state_dir=settings.state_dir,
                 stream=settings.stream,
                 raw_frames=settings.raw_frames,
-            ).run()
+                api_token=settings.api_token.get_secret_value(),
+            )
+            async with AsyncExitStack() as stack:
+                if settings.api_token.get_secret_value() and bridge.api is not None:
+                    runner = web.AppRunner(bridge.api.app, access_log=None)
+                    await runner.setup()
+                    stack.push_async_callback(runner.cleanup)
+                    await web.TCPSite(runner, "0.0.0.0", settings.api_port).start()
+                await bridge.run()
         finally:
             transport.close()
 

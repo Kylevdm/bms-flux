@@ -6,6 +6,7 @@ from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
+from bms_flux.api import LocalAPI
 from bms_flux.clock import Clock
 from bms_flux.drift.findings import FindingStore
 from bms_flux.drift.full_charge import RULE, FullCharge
@@ -65,12 +66,14 @@ class Bridge:
         state_dir: Path = Path("state"),
         stream: bool = True,
         raw_frames: bool = False,
+        api_token: str = "",
     ) -> None:
         self._transport = transport
         self._decoder = decoder
         self._clock = clock
         self._sink = sink
         self._identity = PackIdentity(packs, silent_after_s)
+        self.api = LocalAPI(api_token, self._identity, raw_frames=raw_frames) if api_token else None
         self._unmapped: set[int] = set()
         self._lock = asyncio.Lock()
         self._packs = packs
@@ -99,6 +102,8 @@ class Bridge:
             self._consumers.append(self._full_charge.consume)
         if stream:
             self._consumers.append(self._stream_publisher.consume)
+            if self.api is not None:
+                self._consumers.append(self.api.consume)
 
     async def republish_findings(self) -> None:
         """Republish all configured finding states after broker reconnect."""
@@ -129,7 +134,10 @@ class Bridge:
                     data = await self._transport.read()
                     for frame in splitter.feed(data, final=not data):
                         if self._raw_frames:
-                            await self._stream_publisher.publish_raw(frame.data)
+                            ts = self._clock.now()
+                            if self.api is not None:
+                                self.api.publish_raw(frame.data, ts)
+                            await self._stream_publisher.publish_raw(frame.data, ts=ts)
                         if frame.kind == "resp":
                             async with self._lock:
                                 self._identity.expire(self._clock.now())
