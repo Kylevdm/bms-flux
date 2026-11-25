@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import TypedDict
 
+from bms_flux.identity import PackIdentity
 from bms_flux.mqtt import MQTTSink
 
 _LOG = logging.getLogger(__name__)
@@ -21,7 +22,8 @@ class Finding(TypedDict):
 
 
 class FindingStore:
-    def __init__(self, state_dir: Path, sink: MQTTSink) -> None:
+    def __init__(self, state_dir: Path, sink: MQTTSink, identity: PackIdentity) -> None:
+        self._identity = identity
         self._path = state_dir / "findings.json"
         self._sink = sink
         self._states: dict[str, dict[str, Finding]] = {}
@@ -81,6 +83,8 @@ class FindingStore:
         await self.publish(rule, serial)
 
     async def publish(self, rule: str, serial: str) -> None:
+        if self._identity.links[serial] == "fingerprint_mismatch":
+            return
         state = self._states.get(rule, {}).get(serial)
         await self._sink.publish(
             f"bms_flux/{serial}/{rule}",
@@ -103,5 +107,9 @@ def finding_component(rule: str, serial: str) -> dict[str, object]:
         "payload_on": "ON",
         "payload_off": "OFF",
         "json_attributes_topic": topic,
-        "availability": [{"topic": "bms_flux/status"}],
+        "availability": [
+            {"topic": "bms_flux/status"},
+            {"topic": f"bms_flux/{serial}/finding_availability"},
+        ],
+        "availability_mode": "all",
     }

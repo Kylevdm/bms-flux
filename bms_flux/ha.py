@@ -181,6 +181,13 @@ class SnapshotPublisher:
                     "online" if link == "ok" else "offline",
                     retain=True,
                 )
+                await self._sink.publish(
+                    f"bms_flux/{serial}/finding_availability",
+                    "offline"
+                    if self._identity.links[serial] == "fingerprint_mismatch"
+                    else "online",
+                    retain=True,
+                )
                 if link == "ok":
                     await self._publish(serial)
 

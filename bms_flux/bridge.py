@@ -108,7 +108,7 @@ class Bridge:
         self._unmapped: set[int] = set()
         self._lock = asyncio.Lock()
         self._packs = packs
-        self._store = FindingStore(state_dir, sink)
+        self._store = FindingStore(state_dir, sink, self._identity)
         self._divergence: Divergence | None = None
         if drift_divergence is not None and drift_divergence.enabled:
             self._divergence = Divergence(drift_divergence, sink)

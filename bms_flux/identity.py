@@ -22,6 +22,7 @@ class PackIdentity:
         self._silent_after_s = silent_after_s
         self._blocks: dict[str, dict[str, Reading]] = {pack.serial: {} for pack in packs}
         self._fingerprints: dict[str, tuple[float, float]] = {}
+        self.last_seen: dict[str, float | None] = {pack.serial: None for pack in packs}
 
     def readings(self, serial: str) -> tuple[Reading, ...]:
         """Return the latest accepted blocks, including those of a silent pack."""
@@ -60,11 +61,13 @@ class PackIdentity:
                 a < b for a, b in zip(fingerprint, previous, strict=True)
             ):
                 self.links[serial] = "fingerprint_mismatch"
+                self._blocks[serial].clear()
                 return []
             self._fingerprints[serial] = fingerprint
         reading = Reading(block.address, block.ts, block.block, block.fields, serial)
         blocks = self._blocks[serial]
         blocks[block.block] = reading
+        self.last_seen[serial] = reading.ts
         if self.links[serial] == "ok":
             return [reading]
         if all(

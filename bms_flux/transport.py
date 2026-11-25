@@ -3,6 +3,7 @@
 import asyncio
 import errno
 import logging
+from pathlib import Path
 from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -31,6 +32,10 @@ class SerialTransport:
 
     @classmethod
     async def open(cls, bus: str) -> "SerialTransport":
+        if not (
+            bus.startswith("/dev/") and len(Path(bus).parts) >= 3 and ".." not in Path(bus).parts
+        ):
+            raise ValueError("serial bus must be an absolute /dev/... path")
         reader = asyncio.StreamReader()
         transport, _ = await serial_asyncio_fast.create_serial_connection(
             asyncio.get_running_loop(),

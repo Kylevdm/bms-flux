@@ -94,7 +94,11 @@ async def test_full_charge_hold_evidence_and_bridge_availability(tmp_path: Path)
     async with running(tmp_path) as (bridge, transport, sink, clock):
         config = sink.messages[0][1]["components"]["drift_full_charge"]
         assert config["device_class"] == "problem"
-        assert config["availability"] == [{"topic": "bms_flux/status"}]
+        assert config["availability"] == [
+            {"topic": "bms_flux/status"},
+            {"topic": "bms_flux/PACK/finding_availability"},
+        ]
+        assert config["availability_mode"] == "all"
         transport.chunks.put_nowait(full_set())
         await settle()
         await play(transport, clock, 55)

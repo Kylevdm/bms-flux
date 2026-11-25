@@ -15,7 +15,7 @@ from bms_flux.bridge import Bridge, probe_blocks
 from bms_flux.clock import Clock, SystemClock
 from bms_flux.mqtt import BrokerConnection, BrokerSink, ReconnectingSink
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
-from bms_flux.settings import load_settings
+from bms_flux.settings import Settings, load_settings
 from bms_flux.transport import SupervisedTransport
 
 
@@ -81,6 +81,10 @@ async def run() -> None:
 
 
 async def probe(bus: str, seconds: int = 10, *, clock: Clock | None = None) -> None:
+    try:
+        bus = Settings.valid_bus(bus)
+    except ValueError as error:
+        raise ConfigurationError(str(error)) from None
     clock = clock or SystemClock()
     transport = SupervisedTransport(bus, clock)
     try:
