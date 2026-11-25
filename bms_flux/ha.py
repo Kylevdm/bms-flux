@@ -31,7 +31,6 @@ class SnapshotPublisher:
         self._packs = packs
         self._clock = clock
         self._snapshot_interval_s = snapshot_interval_s
-        self._latest: dict[str, dict[str, FieldValue]] = {}
         self._pic: dict[str, dict[str, FieldValue]] = {}
         self._deadlines = {pack.serial: clock.now() + snapshot_interval_s for pack in packs}
 
@@ -194,8 +193,6 @@ class SnapshotPublisher:
     async def consume(self, stream: ReadingStream) -> None:
         while True:
             reading = await stream.get()
-            latest = self._latest.setdefault(reading.serial, {})
-            latest.update(reading.fields)
             if reading.block == "PIC":
                 previous = self._pic.get(reading.serial)
                 self._pic[reading.serial] = reading.fields
@@ -215,10 +212,15 @@ class SnapshotPublisher:
 
     async def _publish(self, serial: str) -> None:
         # Freshness is rechecked here, after any awaits that led to this publish.
+        # The payload is read from identity, which the core loop updates under its
+        # lock, so emission never depends on how far this consumer has drained.
         self._identity.expire(self._clock.now())
         if self._identity.links[serial] != "ok":
             return
-        await self._sink.publish(f"bms_flux/{serial}/state", json.dumps(self._latest[serial]))
+        fields: dict[str, FieldValue] = {}
+        for reading in self._identity.readings(serial):
+            fields.update(reading.fields)
+        await self._sink.publish(f"bms_flux/{serial}/state", json.dumps(fields))
         self._deadlines[serial] = self._clock.now() + self._snapshot_interval_s
 
     async def publish_snapshots(self) -> None:
@@ -233,7 +235,7 @@ class SnapshotPublisher:
                 await self.sync_links()
                 for serial, deadline in self._deadlines.copy().items():
                     if deadline <= self._clock.now():
-                        if self._identity.links[serial] == "ok" and serial in self._latest:
+                        if self._identity.links[serial] == "ok":
                             await self._publish(serial)
                         else:
                             self._deadlines[serial] = self._clock.now() + self._snapshot_interval_s

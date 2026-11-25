@@ -95,3 +95,44 @@ async def test_bank_discovery_and_complete_capacity_weighted_snapshot(tmp_path: 
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+class StallingBankSink(MemoryMQTT):
+    """A sink whose bank-availability publish stalls past silent_after."""
+
+    def __init__(self, clock: ManualClock) -> None:
+        super().__init__()
+        self._clock = clock
+
+    async def publish(
+        self, topic: str, payload: str, *, retain: bool = False, qos: int = 0
+    ) -> None:
+        if topic == "bms_flux/bank/availability" and payload == "online":
+            self._clock.advance(11)
+        await super().publish(topic, payload, retain=retain, qos=qos)
+
+
+@pytest.mark.asyncio
+async def test_bank_snapshot_is_not_published_once_blocks_expire_mid_publish() -> None:
+    transport, clock = FakeTransport(), ManualClock()
+    sink = StallingBankSink(clock)
+    task = asyncio.create_task(
+        Bridge(
+            transport,
+            SeplosV3Decoder(),
+            sink,
+            [Pack(address=1, serial="A"), Pack(address=2, serial="B")],
+            clock,
+        ).run()
+    )
+    try:
+        await settle()
+        transport.chunks.put_nowait(full_set() + full_set(2))
+        await settle()
+        # The availability publish alone advances past silent_after_s: the
+        # constituent readings are stale by the time the bank state would go out.
+        assert ("bms_flux/bank/availability", "online", True) in sink.messages
+        assert not values(sink, "bms_flux/bank/state")
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

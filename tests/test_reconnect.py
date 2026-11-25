@@ -12,9 +12,10 @@ from bms_flux.bridge import Bridge
 from bms_flux.mqtt import BrokerConnection, ReconnectingSink
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.readings import DecodedBlock, ReadingStream
-from bms_flux.settings import DriftFullCharge, Pack
+from bms_flux.settings import DriftDivergence, DriftFullCharge, Pack
 from bms_flux.stream import StreamPublisher
 from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, frame, settle
+from tests.test_divergence import full_set as divergence_full_set
 
 
 @pytest.mark.asyncio
@@ -99,7 +100,7 @@ async def test_reconnect_restores_current_state_without_replaying_stream(
         clock,
         silent_after_s=120,
         state_dir=tmp_path,
-        drift_full_charge=DriftFullCharge(cell_avg_v=3.2, hold_min=0),
+        drift_full_charge=DriftFullCharge(cell_avg_v=3.2, hold_min=1),
     )
     task = asyncio.create_task(bridge.run())
     try:
@@ -111,18 +112,21 @@ async def test_reconnect_restores_current_state_without_replaying_stream(
         transport.chunks.put_nowait(frame() + block(4, bytes(52)) + block(1, bytes(18)))
         await settle()
         transport.chunks.put_nowait(frame(current=100))
+        await settle()
+        # hold_min has a lower bound of 1, so the second qualifying PIA, a minute
+        # after the first, is what latches the finding while the broker is down.
+        clock.advance(60)
+        transport.chunks.put_nowait(frame(current=100))
         for _ in range(100):
             await asyncio.sleep(0.001)
             if await asyncio.to_thread(lambda: list(tmp_path.glob("*.json"))):
                 break
         assert not connection.messages
-        clock.advance(1)
-        await settle()
-        assert attempts == [0, 1]
+        assert attempts == [0, 60]
         connection.available = True
         clock.advance(2)
         await settle()
-        assert attempts == [0, 1, 3]
+        assert attempts == [0, 60, 62]
         topics = [topic for topic, _, _ in connection.messages]
         assert "homeassistant/device/bms_flux_PACK/config" in topics
         assert "homeassistant/device/bms_flux_bridge/config" in topics
@@ -148,7 +152,7 @@ async def test_reconnect_restores_current_state_without_replaying_stream(
         connection.available = True
         clock.advance(1)
         await settle()
-        assert attempts[-1] == 4
+        assert attempts[-1] == 63
         assert ("bms_flux/PACK/availability", "online", True) in connection.messages
         states = [p for t, p, _ in connection.messages if t == "bms_flux/PACK/state"]
         assert states[-1]["current"] == 2.0
@@ -307,3 +311,91 @@ def test_core_fault_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit) as caught:
         main()
     assert caught.value.code == 1
+
+
+@pytest.mark.asyncio
+async def test_broker_reconnect_resets_the_hold_before_live_consumers_publish(
+    tmp_path: Path,
+) -> None:
+    clock, transport = ManualClock(), FakeTransport()
+    stalled, release = asyncio.Event(), asyncio.Event()
+
+    class Connection(MemoryMQTT):
+        available = True
+        disconnected = asyncio.Event()
+        stall_restore = False
+
+        async def wait_disconnected(self) -> None:
+            await self.disconnected.wait()
+            raise aiomqtt.MqttError("offline")
+
+        async def publish(
+            self, topic: str, payload: str, *, retain: bool = False, qos: int = 0
+        ) -> None:
+            if self.stall_restore and topic.startswith("homeassistant/"):
+                # The reconnection's restoration stalls, as a slow broker round-trip would.
+                stalled.set()
+                await release.wait()
+            await super().publish(topic, payload, retain=retain, qos=qos)
+
+    connection = Connection()
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BrokerConnection]:
+        yield connection
+
+    sink = ReconnectingSink(connect, clock)
+    bridge = Bridge(
+        transport,
+        SeplosV3Decoder(),
+        sink,
+        [Pack(address=1, serial="A"), Pack(address=2, serial="B")],
+        clock,
+        silent_after_s=120,
+        state_dir=tmp_path,
+        drift_divergence=DriftDivergence(hold_min=1),
+    )
+    task = asyncio.create_task(bridge.run())
+    try:
+        await settle()
+        # Latch an active divergence finding from a spread that has held for an hour.
+        for _ in range(13):
+            clock.advance(5)
+            transport.chunks.put_nowait(
+                divergence_full_set(1, soc=300) + divergence_full_set(2, soc=400)
+            )
+            await settle()
+        first_start = next(
+            payload["hold_start"]
+            for topic, payload, _ in connection.messages
+            if topic == "bms_flux/bank/drift_divergence" and payload["active"]
+        )
+        # The broker drops and returns while the packs stay fresh.
+        connection.available = False
+        connection.disconnected.set()
+        await settle()
+        connection.disconnected.clear()
+        connection.available = True
+        connection.stall_restore = True
+        connection.messages.clear()
+        clock.advance(1)
+        await asyncio.wait_for(stalled.wait(), 1)
+        # A concurrent bank evaluation publishes while restoration is still stalled:
+        # the new connection is live, so the divergence hold must already be reset.
+        clock.advance(10)
+        await settle()
+        drift = [
+            payload
+            for topic, payload, _ in connection.messages
+            if topic == "bms_flux/bank/drift_divergence"
+        ]
+        assert drift
+        assert drift[0]["active"] is False
+        assert drift[0]["hold_start"] != first_start
+        release.set()
+        await settle()
+        assert not task.done()
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

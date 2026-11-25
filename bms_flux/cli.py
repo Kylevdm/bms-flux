@@ -25,7 +25,7 @@ class ConfigurationError(Exception):
 
 async def run() -> None:
     try:
-        if addon.is_addon_mode():
+        if await asyncio.to_thread(addon.is_addon_mode):
             settings = await asyncio.to_thread(addon.load_addon_settings)
         else:
             settings = await asyncio.to_thread(load_settings)
@@ -35,6 +35,7 @@ async def run() -> None:
             for problem in error.errors(include_input=False, include_url=False)
         )
         raise ConfigurationError(f"invalid configuration:\n{problems}") from None
+    logging.getLogger().setLevel(settings.log_level.upper())
     mqtt = settings.mqtt
 
     @asynccontextmanager

@@ -1,9 +1,15 @@
-"""Fan out trusted readings from the read-only transport to independent consumers."""
+"""Fan out trusted readings from the read-only transport to independent consumers.
+
+The core loop never waits on a consumer: each one owns a bounded queue, and a
+full queue drops its oldest reading. Quarantine is enforced at emission time:
+no output publishes under a pack serial whose link is fingerprint_mismatch.
+"""
 
 import asyncio
 import json
 import logging
 from collections.abc import Callable, Coroutine
+from contextlib import suppress
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -61,20 +67,30 @@ async def probe_blocks(
 
 _LOG = logging.getLogger(__name__)
 
+# Ten seconds of bus readings at the sniffed rate of about 30 blocks/s.
+CONSUMER_QUEUE_LIMIT = 300
 
-class _ConsumerStream(ReadingStream):
-    """Track the in-flight reading so a failed consumer cannot strand join()."""
 
-    active = False
+class _ConsumerQueue(ReadingStream):
+    """One consumer's bounded fan-out queue; a stall drops the oldest reading."""
 
-    async def get(self) -> Reading:
-        reading = await super().get()
-        self.active = True
-        return reading
+    def __init__(self) -> None:
+        super().__init__(maxsize=CONSUMER_QUEUE_LIMIT)
+        self.dropped = 0
 
-    def task_done(self) -> None:
-        self.active = False
-        super().task_done()
+    def offer(self, reading: Reading) -> None:
+        try:
+            self.put_nowait(reading)
+        except asyncio.QueueFull:
+            with suppress(asyncio.QueueEmpty):
+                self.get_nowait()
+            self.dropped += 1
+            # A stalled consumer drops ~30 readings/s: log the first drop and every 100th.
+            if self.dropped % 100 == 1:
+                _LOG.warning(
+                    "Consumer queue full; dropped the oldest reading (total %d)", self.dropped
+                )
+            self.put_nowait(reading)
 
 
 class Bridge:
@@ -140,11 +156,13 @@ class Bridge:
             finding_rules=list(self._rules),
         )
         self._raw_frames = raw_frames
-        self._stream_publisher = StreamPublisher(sink, clock, stream=stream, raw_frames=raw_frames)
-        # Every consumer of trusted readings gets its own queue (the fan-out).
+        self._stream_publisher = StreamPublisher(
+            sink, clock, self._identity, stream=stream, raw_frames=raw_frames
+        )
+        # Every consumer of trusted readings gets its own queue (the fan-out);
+        # the bank and snapshot publishers read identity under the core lock instead.
         self._consumers: list[Callable[[ReadingStream], Coroutine[Any, Any, None]]] = [
             self._publisher.consume,
-            self._bank.consume,
         ]
         self._consumers.extend(rule.consume for rule in self._rules.values())
         if stream:
@@ -182,11 +200,7 @@ class Bridge:
         )
 
     async def _contain(
-        self,
-        operation: Callable[[], Coroutine[Any, Any, None]],
-        queue: _ConsumerStream | None = None,
-        *,
-        restart: bool = True,
+        self, operation: Callable[[], Coroutine[Any, Any, None]], *, restart: bool = True
     ) -> None:
         while True:
             try:
@@ -194,13 +208,14 @@ class Bridge:
                 return
             except Exception as error:
                 _LOG.exception("Consumer failed (%s)", type(error).__name__)
-                if queue is not None:
-                    if not queue.active:
-                        await queue.get()
-                    queue.task_done()
                 if not restart:
                     return
                 await asyncio.sleep(0)
+
+    async def _reset_outage_state(self) -> None:
+        """Reset outage-sensitive state before a broker reconnect becomes publishable."""
+        if self._divergence is not None:
+            self._divergence.reset()
 
     async def run(self) -> None:
         if self._rules:
@@ -210,7 +225,9 @@ class Bridge:
             await self._run()
             return
         async with asyncio.TaskGroup() as tasks:
-            broker = tasks.create_task(self._reconnecting.run(self.republish))
+            broker = tasks.create_task(
+                self._reconnecting.run(self.republish, self._reset_outage_state)
+            )
             try:
                 await self._run()
                 await self._reconnecting.ready.wait()
@@ -218,11 +235,12 @@ class Bridge:
                 broker.cancel()
 
     async def _run(self) -> None:
-        queues = [_ConsumerStream() for _ in self._consumers]
+        queues = [_ConsumerQueue() for _ in self._consumers]
         splitter = FrameSplitter()
+        generation: int | None = None
         async with asyncio.TaskGroup() as tasks:
             running: list[asyncio.Task[None]] = [
-                tasks.create_task(self._contain(partial(consume, queue), queue))
+                tasks.create_task(self._contain(partial(consume, queue)))
                 for consume, queue in zip(self._consumers, queues, strict=True)
             ]
             running.append(tasks.create_task(self._contain(self._publisher.publish_snapshots)))
@@ -232,14 +250,24 @@ class Bridge:
                     data = await self._transport.read()
                     if not data:
                         raise ConnectionError("unsupervised transport closed")
+                    if self._transport.generation != generation:
+                        # A reopened transport must not complete another connection's
+                        # partial frame: bytes from different connections never combine.
+                        generation = self._transport.generation
+                        splitter.reset()
                     frames = splitter.feed(data)
                     self._bank.record_frames(frames, splitter.crc_errors)
                     await self._contain(self._bank.publish_health, restart=False)
+                    # One turn per chunk, so consumers keep up with a buffered burst
+                    # without the decoder ever waiting on any of them.
+                    await asyncio.sleep(0)
                     for frame in frames:
                         if self._raw_frames:
                             ts = self._clock.now()
                             if self.api is not None:
-                                self.api.publish_raw(frame.data, ts)
+                                await self._contain(
+                                    partial(self.api.publish_raw, frame.data, ts), restart=False
+                                )
                             await self._contain(
                                 partial(self._stream_publisher.publish_raw, frame.data, ts=ts),
                                 restart=False,
@@ -270,9 +298,7 @@ class Bridge:
                                         )
                                     for reading in self._identity.accept(block, self._clock.now()):
                                         for queue in queues:
-                                            await queue.put(reading)
-                                    for queue in queues:
-                                        await queue.join()
+                                            queue.offer(reading)
                                     await self._contain(self._publisher.sync_links, restart=False)
                                     await self._contain(self._bank.sync, restart=False)
             finally:

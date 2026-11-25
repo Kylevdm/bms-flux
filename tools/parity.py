@@ -25,6 +25,7 @@ import json
 import os
 import statistics
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterable, Mapping, Sequence
@@ -412,7 +413,7 @@ def analyze(
     }
     points = {entity_id: records for entity_id, records in points.items() if records}
 
-    packs, _links, entity_errors = _flux_packs(points)
+    packs, _links, bank_current, entity_errors = _flux_packs(points)
     observations, observation_errors = _ble_observations(points, bms_ble_master)
     observations = [
         observation for observation in observations if start_ts <= observation.ts <= end_ts
@@ -445,9 +446,13 @@ def analyze(
     temperature_layout_confirmed = False
     temperature_layout_note = "not checked"
     if assignment is not None:
-        comparisons = _compare(aligned, assignment)
+        comparisons = _compare(aligned, assignment, bank_current)
         if not comparisons:
             decode_errors.append("no aligned bms_ble / bms-flux pairs to compare")
+        if bank_current is None:
+            decode_errors.append(
+                "no bms-flux bank_current entity history; cannot compare the bank current"
+            )
         layout_ok, layout_errors, temperature_layout_note = _confirm_temperature_layout(
             aligned, assignment
         )
@@ -516,8 +521,13 @@ def _normalise(
             if isinstance(item, Mapping):
                 _add_record(grouped, item)
             else:
+                # A minimal history response omits entity_id from every record
+                # after the first of each entity: those keep that identity.
+                enclosing: str | None = None
                 for record in item:
-                    _add_record(grouped, record)
+                    if isinstance(record, Mapping) and isinstance(record.get("entity_id"), str):
+                        enclosing = record["entity_id"]
+                    _add_record(grouped, record, enclosing)
 
     points: dict[str, list[Point]] = {}
     for entity_id, records in grouped.items():
@@ -538,8 +548,14 @@ def _normalise(
     return points
 
 
-def _add_record(grouped: dict[str, list[Mapping[str, Any]]], record: Mapping[str, Any]) -> None:
+def _add_record(
+    grouped: dict[str, list[Mapping[str, Any]]],
+    record: Mapping[str, Any],
+    enclosing: str | None = None,
+) -> None:
     entity_id = record.get("entity_id")
+    if not isinstance(entity_id, str):
+        entity_id = enclosing
     if isinstance(entity_id, str):
         grouped.setdefault(entity_id, []).append(record)
 
@@ -593,15 +609,20 @@ def _float_list(value: Any) -> list[float] | None:
 
 def _flux_packs(
     points: Mapping[str, list[Point]],
-) -> tuple[dict[str, PackHistory], dict[str, Series], list[str]]:
+) -> tuple[dict[str, PackHistory], dict[str, Series], Series | None, list[str]]:
     fields: dict[str, dict[str, Series]] = {}
     links: dict[str, Series] = {}
+    bank_current: Series | None = None
     errors: list[str] = []
     expected = set(PACK_FIELDS)
     for entity_id, records in points.items():
         if not entity_id.startswith("sensor.bms_flux_"):
             continue
         body = entity_id.removeprefix("sensor.bms_flux_")
+        if body == "bank_current":
+            # The bank current bms-flux actually publishes, not a reconstructed sum.
+            bank_current = Series(list(records))
+            continue
         serial_lower, separator, name = body.partition("_")
         if not separator or not serial_lower.isalnum():
             continue
@@ -613,14 +634,14 @@ def _flux_packs(
         elif name in expected:
             fields.setdefault(serial, {})[name] = Series(list(records))
     if not fields:
-        return {}, links, errors
+        return {}, links, bank_current, errors
     packs: dict[str, PackHistory] = {}
     for serial, pack_fields in fields.items():
         missing = sorted(expected - pack_fields.keys())
         if missing:
             errors.append(f"{serial}: missing bms-flux entities for {', '.join(missing)}")
         packs[serial] = PackHistory(serial, pack_fields, links.get(serial))
-    return packs, links, errors
+    return packs, links, bank_current, errors
 
 
 def _ble_observations(
@@ -847,7 +868,11 @@ def _same(left: float, right: float) -> bool:
     return abs(left - right) <= 1e-9
 
 
-def _compare(aligned: Sequence[Aligned], assignment: Mapping[str, int]) -> list[Comparison]:
+def _compare(
+    aligned: Sequence[Aligned],
+    assignment: Mapping[str, int],
+    bank_current: Series | None,
+) -> list[Comparison]:
     pairs: dict[tuple[str, str], list[Pair]] = {}
     for serial, _slot in assignment.items():
         for name in PACK_FIELDS:
@@ -856,7 +881,7 @@ def _compare(aligned: Sequence[Aligned], assignment: Mapping[str, int]) -> list[
 
     for item in aligned:
         observation = item.observation
-        currents: dict[str, tuple[float, float]] = {}
+        ble_currents: list[float] = []
         for serial, slot in assignment.items():
             snapshot = item.flux.get(serial)
             if snapshot is None:
@@ -876,10 +901,17 @@ def _compare(aligned: Sequence[Aligned], assignment: Mapping[str, int]) -> list[
                         abs(difference) <= limit + 1e-9,
                     )
                 )
-            currents[serial] = (values["current"], observation.pack_current[slot])
-        if len(currents) == len(assignment):
-            flux_bank = sum(flux for flux, _ in currents.values())
-            ble_bank = sum(ble for _, ble in currents.values())
+            ble_currents.append(observation.pack_current[slot])
+        if len(ble_currents) == len(assignment) and bank_current is not None:
+            # Compare the bank current bms-flux publishes on the bank device,
+            # not a sum reconstructed from the per-pack current entities.
+            ble_bank = sum(ble_currents)
+            point = bank_current.last_at(item.observation.ts)
+            if point is None or item.observation.ts - point.ts > MAX_SNAPSHOT_AGE_S:
+                continue
+            flux_bank = _number(point.state)
+            if flux_bank is None:
+                continue
             spec = FIELD_SPECS["bank_current"]
             limit = spec.limit(ble_bank)
             difference = flux_bank - ble_bank
@@ -898,7 +930,8 @@ def _compare(aligned: Sequence[Aligned], assignment: Mapping[str, int]) -> list[
         _comparison(pack, name, field_pairs, FIELD_SPECS[name])
         for (pack, name), field_pairs in pairs.items()
     ]
-    comparisons.append(_comparison("bank", "bank_current", bank, FIELD_SPECS["bank_current"]))
+    if bank_current is not None:
+        comparisons.append(_comparison("bank", "bank_current", bank, FIELD_SPECS["bank_current"]))
     return comparisons
 
 
@@ -1105,6 +1138,21 @@ def discover_entities(base_url: str, token: str) -> list[str]:
     ]
 
 
+def _clean_token(raw: str | None) -> str | None:
+    """Strip surrounding whitespace and reject a token that cannot be sent safely."""
+    token = (raw or "").strip()
+    if not token or any(character.isspace() or not character.isascii() for character in token):
+        return None
+    return token
+
+
+def _describe(error: Exception) -> str:
+    """A request failure's cause, without echoing the URL or any header value."""
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {error.code}"
+    return type(error).__name__
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start", required=True, help="window start, ISO-8601")
@@ -1131,21 +1179,28 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     url = args.url or os.environ.get("HA_URL")
-    token = os.environ.get("HA_TOKEN")
+    token = _clean_token(os.environ.get("HA_TOKEN"))
     if not url or not token:
         print("parity: set HA_URL and HA_TOKEN", file=sys.stderr)
         return 2
     start = _as_timestamp(args.start)
     end = _as_timestamp(args.end) if args.end else datetime.now(UTC).timestamp()
-    entities = discover_entities(url, token)
-    flux_entities = [entity for entity in entities if entity.startswith("sensor.bms_flux_")]
-    ble_prefix = f"sensor.{args.bms_ble_serial.lower()}_"
-    ble_entities = [entity for entity in entities if entity.startswith(ble_prefix)]
-    history: list[list[dict[str, Any]]] = []
-    if flux_entities:
-        history.extend(fetch_history(url, token, flux_entities, start, end, minimal=True))
-    if ble_entities:
-        history.extend(fetch_history(url, token, ble_entities, start, end, minimal=False))
+    try:
+        entities = discover_entities(url, token)
+        flux_entities = [entity for entity in entities if entity.startswith("sensor.bms_flux_")]
+        ble_prefix = f"sensor.{args.bms_ble_serial.lower()}_"
+        ble_entities = [entity for entity in entities if entity.startswith(ble_prefix)]
+        history: list[list[dict[str, Any]]] = []
+        if flux_entities:
+            history.extend(fetch_history(url, token, flux_entities, start, end, minimal=True))
+        if ble_entities:
+            history.extend(fetch_history(url, token, ble_entities, start, end, minimal=False))
+    except (OSError, ValueError) as error:
+        print(
+            f"parity: Home Assistant request failed ({_describe(error)})",
+            file=sys.stderr,
+        )
+        return 2
     report = analyze(
         history,
         start=start,

@@ -11,7 +11,14 @@ import pytest
 from bms_flux.bridge import Bridge
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import DriftFullCharge, Pack
-from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, settle
+from tests.helpers import (
+    FakeTransport,
+    ManualClock,
+    MemoryMQTT,
+    await_saved_finding,
+    block,
+    settle,
+)
 
 
 class PlaybackTransport(FakeTransport):
@@ -28,6 +35,9 @@ class PlaybackTransport(FakeTransport):
         self.chunks.put_nowait(data)
         async with asyncio.timeout(2):
             await self.ready.wait()
+        # The core loop no longer joins consumer queues after each frame, so a
+        # played chunk counts as processed only once the consumers have drained.
+        await settle()
 
 
 def full_set(
@@ -131,6 +141,7 @@ async def test_latch_survives_restart_and_clears_only_at_new_agreeing_anchor(
         transport.chunks.put_nowait(full_set())
         await settle()
         await play(transport, clock, 60)
+        await await_saved_finding(tmp_path, "drift_full_charge", "PACK", True)
     async with running(tmp_path) as (bridge, transport, sink, clock):
         assert states(sink)[-1]["active"] is True
         clock.advance(10)
@@ -147,6 +158,7 @@ async def test_latch_survives_restart_and_clears_only_at_new_agreeing_anchor(
         await play(transport, clock, 55, soc=950)
         assert states(sink)[-1]["active"] is True
         await play(transport, clock, 5, soc=950)
+        await await_saved_finding(tmp_path, "drift_full_charge", "PACK", False)
     assert states(sink)[-1]["active"] is False
     async with running(tmp_path) as (_, _, sink, _):
         assert states(sink)[-1]["active"] is False

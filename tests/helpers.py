@@ -3,7 +3,10 @@
 import asyncio
 import json
 import struct
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from bms_flux.clock import Clock
 
@@ -29,6 +32,8 @@ class ManualClock:
 
 
 class FakeTransport:
+    generation: int = 0
+
     def __init__(self) -> None:
         self.chunks: asyncio.Queue[bytes] = asyncio.Queue()
 
@@ -91,3 +96,23 @@ def discard_snapshots(sink: MemoryMQTT) -> None:
 async def settle() -> None:
     for _ in range(30):
         await asyncio.sleep(0)
+
+
+async def await_saved_finding(
+    state_dir: Path, rule: str, serial: str, active: bool, timeout_s: float = 5.0
+) -> None:
+    """Wait in bounded real time for a drift finding to reach the persisted store.
+
+    Persistence runs in a worker thread; without the core loop's old join
+    barrier a plain settle() cannot observe the save completing.
+    """
+    path = state_dir / "findings.json"
+    for _ in range(int(timeout_s * 1000)):
+        await asyncio.sleep(0.001)
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get(rule, {}).get(serial, {}).get("active") is active:
+            return
+    pytest.fail(f"finding {rule}/{serial} active={active} was not persisted")

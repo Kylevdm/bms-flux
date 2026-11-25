@@ -110,7 +110,7 @@ class DriftDivergence(BaseModel):
     enabled: bool = True
     spread_on_pts: float = 5
     spread_off_pts: float = 3
-    hold_min: Duration = 30
+    hold_min: Duration = Field(default=30, ge=1, le=1440)
 
 
 class DriftFullCharge(BaseModel):
@@ -119,8 +119,8 @@ class DriftFullCharge(BaseModel):
     enabled: bool = True
     cell_avg_v: float = 3.45
     max_current_c: float = 0.05
-    hold_min: Duration = 15
-    soc_below_pct: float = 95
+    hold_min: Duration = Field(default=15, ge=1, le=1440)
+    soc_below_pct: float = Field(default=95, ge=0, le=100)
 
 
 class DriftRestedOCV(BaseModel):
@@ -128,10 +128,10 @@ class DriftRestedOCV(BaseModel):
 
     enabled: bool = True
     max_current_c: float = 0.02
-    rest_h: Duration = 2
-    ocv_soc_below_pct: float = 20
+    rest_h: Duration = Field(default=2, ge=1, le=72)
+    ocv_soc_below_pct: float = Field(default=20, ge=0, le=100)
     gap_pts: float = 10
-    min_temp_c: float = 10
+    min_temp_c: float = Field(default=10, ge=-20, le=60)
 
 
 class OCVPoint(BaseModel):

@@ -27,6 +27,12 @@ class FrameSplitter:
         self._position = 0
         self._failed_until = 0
 
+    def reset(self) -> None:
+        """Discard partial framing state; a reopened transport starts a fresh stream."""
+        self._buffer.clear()
+        self._position = 0
+        self._failed_until = 0
+
     def feed(self, data: bytes, *, final: bool = False) -> list[Frame]:
         self._buffer.extend(data)
         frames: list[Frame] = []

@@ -1,7 +1,11 @@
 """The parity check turns recorded HA history into a report and a verdict."""
 
+import io
+import urllib.request
 from datetime import UTC, datetime
 from typing import Any
+
+import pytest
 
 from tools import parity
 
@@ -44,6 +48,9 @@ class History:
 
     def link(self, serial: str, timestamp: float, state: str) -> None:
         self.add(f"sensor.bms_flux_{serial.lower()}_link", timestamp, state)
+
+    def bank_current(self, timestamp: float, state: float | str) -> None:
+        self.add("sensor.bms_flux_bank_current", timestamp, state)
 
     def ble(
         self,
@@ -111,6 +118,7 @@ def build(count: int = 20) -> tuple[History, float, float]:
         other = other_fields(index)
         history.flux_pack(MASTER, timestamp - 2, master)
         history.flux_pack(OTHER, timestamp - 2, other)
+        history.bank_current(timestamp - 2, master["current"] + other["current"])
         history.ble(
             timestamp,
             {
@@ -283,6 +291,7 @@ def test_ha_restart_is_excluded_and_listed() -> None:
         other = other_fields(index)
         history.flux_pack(MASTER, timestamp - 2, master)
         history.flux_pack(OTHER, timestamp - 2, other)
+        history.bank_current(timestamp - 2, master["current"] + other["current"])
         history.ble(
             timestamp,
             {
@@ -392,3 +401,92 @@ def test_link_state_from_before_the_window_is_used() -> None:
 
     assert report.stability_passed
     assert all(stability.ratio == 1 for stability in report.stability)
+
+
+def test_bank_current_compares_the_published_bank_entity_not_a_sum() -> None:
+    history, start, end = build()
+    # The per-pack currents agree with bms_ble, but the published bank entity is wrong.
+    for point in history.entities["sensor.bms_flux_bank_current"]:
+        point["state"] = "0.0"
+    report = analyze(history, start, end)
+
+    bank = next(
+        comparison for comparison in report.comparisons if comparison.field == "bank_current"
+    )
+    assert not bank.passed
+    assert not report.decode_passed
+
+
+def test_missing_bank_current_entity_fails_the_decode_verdict() -> None:
+    history, start, end = build()
+    del history.entities["sensor.bms_flux_bank_current"]
+    report = analyze(history, start, end)
+
+    assert not report.decode_passed
+    assert any("bank_current" in error for error in report.decode_errors)
+
+
+def test_minimal_response_records_keep_the_enclosing_entity() -> None:
+    history, start, end = build(count=10)
+    history.link(OTHER, START + 150, "fingerprint_mismatch")
+    # minimal_response: only the first record of each entity carries entity_id.
+    minimal: list[list[dict[str, Any]]] = []
+    for records in history.as_ha_response():
+        stripped: list[dict[str, Any]] = []
+        for index, record in enumerate(records):
+            if index:
+                record = dict(record)
+                record.pop("entity_id", None)
+            stripped.append(record)
+        minimal.append(stripped)
+
+    report = parity.analyze(minimal, start=start, end=end, purge_keep_days=7)
+
+    assert not report.stability_passed
+    assert "fingerprint_mismatch" in report.to_markdown()
+
+
+def test_token_with_surrounding_whitespace_is_stripped_and_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_urlopen(request: urllib.request.Request, **kwargs: object) -> io.BytesIO:
+        captured["authorization"] = dict(request.header_items()).get("Authorization", "")
+        return io.BytesIO(b"[]")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("HA_URL", "http://ha.test")
+    monkeypatch.setenv("HA_TOKEN", "  secret-token-value\n")
+    parity.main(["--start", "2026-11-24T00:00:00Z", "--output", "-"])
+    assert captured["authorization"] == "Bearer secret-token-value"
+
+
+def test_malformed_token_is_rejected_without_any_request_or_echo(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("a request was attempted with a malformed token")
+
+    monkeypatch.setattr(urllib.request, "urlopen", forbidden)
+    monkeypatch.setenv("HA_URL", "http://ha.test")
+    monkeypatch.setenv("HA_TOKEN", "bad\ttoken-with-secret-value\n")
+    assert parity.main(["--start", "2026-11-24T00:00:00Z"]) == 2
+    err = capsys.readouterr().err
+    assert "token-with-secret-value" not in err
+    assert "HA_TOKEN" in err
+
+
+def test_request_failure_is_sanitised(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def failing(request: urllib.request.Request, **kwargs: object) -> io.BytesIO:
+        raise ValueError("Invalid header value b'Bearer secret-token-value\\n'")
+
+    monkeypatch.setattr(urllib.request, "urlopen", failing)
+    monkeypatch.setenv("HA_URL", "http://ha.test")
+    monkeypatch.setenv("HA_TOKEN", "secret-token-value")
+    assert parity.main(["--start", "2026-11-24T00:00:00Z"]) == 2
+    err = capsys.readouterr().err
+    assert "secret-token-value" not in err
+    assert "ValueError" in err

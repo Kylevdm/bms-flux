@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from bms_flux.clock import Clock
+from bms_flux.identity import PackIdentity
 from bms_flux.mqtt import MQTTSink
 from bms_flux.readings import Reading, ReadingStream
 
@@ -47,12 +48,14 @@ class StreamPublisher:
         self,
         sink: MQTTSink,
         clock: Clock,
+        identity: PackIdentity,
         *,
         stream: bool = True,
         raw_frames: bool = False,
     ) -> None:
         self._sink = sink
         self._clock = clock
+        self._identity = identity
         self._stream = stream
         self._raw_frames = raw_frames
 
@@ -60,12 +63,15 @@ class StreamPublisher:
         """Consume one fan-out queue of trusted readings."""
         while True:
             reading = await stream.get()
-            await self._sink.publish(
-                f"bms_flux/{reading.serial}/stream",
-                json.dumps(format_reading(reading)),
-                retain=False,
-                qos=0,
-            )
+            # Identity is rechecked at the moment of emission, so a reading queued
+            # before a fingerprint mismatch is never published under its serial.
+            if self._identity.links[reading.serial] == "ok":
+                await self._sink.publish(
+                    f"bms_flux/{reading.serial}/stream",
+                    json.dumps(format_reading(reading)),
+                    retain=False,
+                    qos=0,
+                )
             stream.task_done()
 
     async def publish_raw(self, frame: bytes, *, ts: float | None = None) -> None:

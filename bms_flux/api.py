@@ -70,10 +70,13 @@ class LocalAPI:
         """Fan out without awaiting any WebSocket client."""
         while True:
             reading = await stream.get()
+            # One turn per reading: a producer burst must not overflow the bounded
+            # queue of a client whose sender is actively draining it.
+            await asyncio.sleep(0)
             self._offer(format_reading(reading))
             stream.task_done()
 
-    def publish_raw(self, frame: bytes, ts: float) -> None:
+    async def publish_raw(self, frame: bytes, ts: float) -> None:
         """Offer a CRC-valid raw frame without waiting for clients."""
         if self._raw_frames:
             self._offer(format_raw_frame(frame[0], frame, ts))
@@ -114,7 +117,8 @@ class LocalAPI:
         async def send() -> None:
             while True:
                 serial, text = await client.queue.get()
-                if serial is None or self._identity.links[serial] == "ok":
+                # Only a fingerprint mismatch quarantines a serial; silence does not.
+                if serial is None or self._identity.links[serial] != "fingerprint_mismatch":
                     await ws.send_str(text)
 
         async def receive() -> None:
