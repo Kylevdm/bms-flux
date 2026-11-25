@@ -22,4 +22,4 @@ class Reading(DecodedBlock):
 
 
 class ReadingStream(asyncio.Queue[Reading]):
-    """The single internal stream consumed by the snapshot publisher."""
+    """One consumer's queue of trusted readings from the bridge's fan-out."""

@@ -80,12 +80,21 @@ class ReconnectingSink:
             return []
         return await self._sink.read_retained(topic_filter, clock)
 
-    async def run(self, restore: Callable[[], Awaitable[None]]) -> None:
+    async def run(
+        self,
+        restore: Callable[[], Awaitable[None]],
+        reset: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Reconnect forever; ``reset`` runs before the new connection is publishable."""
         backoff = RECONNECT_BACKOFF_MIN_S
         while True:
             try:
                 async with self._connect() as sink:
                     self._failed.clear()
+                    if reset is not None:
+                        # Outage-sensitive state resets before the new connection
+                        # becomes publishable to live consumers.
+                        await reset()
                     self._sink = sink
                     await restore()
                     self.ready.set()

@@ -1,11 +1,18 @@
-"""Store latched findings by rule and pack serial and publish their evidence."""
+"""Store latched findings by rule and pack serial and publish their evidence.
+
+Saves are serialised: each writes one immutable snapshot through a uniquely
+owned temporary file, so overlapping rules can never race the persistence.
+"""
 
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import TypedDict
+from uuid import uuid4
 
+from bms_flux.identity import PackIdentity
 from bms_flux.mqtt import MQTTSink
 
 _LOG = logging.getLogger(__name__)
@@ -21,10 +28,12 @@ class Finding(TypedDict):
 
 
 class FindingStore:
-    def __init__(self, state_dir: Path, sink: MQTTSink) -> None:
+    def __init__(self, state_dir: Path, sink: MQTTSink, identity: PackIdentity) -> None:
+        self._identity = identity
         self._path = state_dir / "findings.json"
         self._sink = sink
         self._states: dict[str, dict[str, Finding]] = {}
+        self._save_lock = asyncio.Lock()
 
     def load(self) -> None:
         try:
@@ -64,10 +73,11 @@ class FindingStore:
             _LOG.warning("Finding state missing or corrupt; starting empty")
             self._states = {}
 
-    def _save(self) -> None:
+    def _save(self, snapshot: str) -> None:
+        """Write one immutable snapshot through a uniquely owned temporary file."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self._path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(self._states, allow_nan=False))
+        temporary = self._path.with_name(f"{self._path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+        temporary.write_text(snapshot)
         temporary.replace(self._path)
 
     async def set(self, rule: str, serial: str, finding: Finding) -> None:
@@ -77,10 +87,15 @@ class FindingStore:
         if previous is None and not finding["active"]:
             return
         self._states.setdefault(rule, {})[serial] = finding
-        await asyncio.to_thread(self._save)
+        # Publish first: emission never waits on disk. The serialised save follows.
         await self.publish(rule, serial)
+        async with self._save_lock:
+            snapshot = json.dumps(self._states, allow_nan=False)
+            await asyncio.to_thread(self._save, snapshot)
 
     async def publish(self, rule: str, serial: str) -> None:
+        if self._identity.links[serial] == "fingerprint_mismatch":
+            return
         state = self._states.get(rule, {}).get(serial)
         await self._sink.publish(
             f"bms_flux/{serial}/{rule}",
@@ -103,5 +118,9 @@ def finding_component(rule: str, serial: str) -> dict[str, object]:
         "payload_on": "ON",
         "payload_off": "OFF",
         "json_attributes_topic": topic,
-        "availability": [{"topic": "bms_flux/status"}],
+        "availability": [
+            {"topic": "bms_flux/status"},
+            {"topic": f"bms_flux/{serial}/finding_availability"},
+        ],
+        "availability_mode": "all",
     }

@@ -11,7 +11,12 @@ import pytest
 from bms_flux.bridge import Bridge
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import DriftFullCharge, DriftRestedOCV, OCVPoint, Pack
-from tests.helpers import ManualClock, MemoryMQTT, block
+from tests.helpers import (
+    ManualClock,
+    MemoryMQTT,
+    await_saved_finding,
+    block,
+)
 from tests.test_full_charge import PlaybackTransport
 
 
@@ -85,7 +90,11 @@ async def test_rested_ocv_two_hour_hold_evidence_and_discovery(tmp_path: Path) -
     async with running(tmp_path) as (bridge, transport, sink, clock):
         config = sink.messages[0][1]["components"]["drift_rested_ocv"]
         assert config["device_class"] == "problem"
-        assert config["availability"] == [{"topic": "bms_flux/status"}]
+        assert config["availability"] == [
+            {"topic": "bms_flux/status"},
+            {"topic": "bms_flux/PACK/finding_availability"},
+        ]
+        assert config["availability_mode"] == "all"
         await transport.play(full_set())
         await play(transport, clock, 7195)
         assert states(sink)[-1] == {"active": False}
@@ -211,6 +220,7 @@ async def test_rested_ocv_latches_across_restart_and_clears_at_new_agreeing_anch
         await play(transport, clock, 3600)
         # Agreement during the same rest is not a new anchor.
         await play(transport, clock, 5, soc=100)
+        await await_saved_finding(tmp_path, "drift_rested_ocv", "PACK", True)
     async with running(tmp_path, settings=settings) as (bridge, transport, sink, clock):
         assert states(sink)[-1]["active"] is True
         await bridge.republish_findings()
@@ -223,6 +233,7 @@ async def test_rested_ocv_latches_across_restart_and_clears_at_new_agreeing_anch
         await play(transport, clock, 3600, soc=200)
         assert states(sink)[-1]["active"] is True
         await play(transport, clock, 5, soc=200)
+        await await_saved_finding(tmp_path, "drift_rested_ocv", "PACK", False)
         assert states(sink)[-1]["active"] is False
     async with running(tmp_path, settings=settings) as (_, _, sink, _):
         assert states(sink)[-1]["active"] is False

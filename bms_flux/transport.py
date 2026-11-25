@@ -3,6 +3,7 @@
 import asyncio
 import errno
 import logging
+from pathlib import Path
 from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -21,6 +22,10 @@ STOP_BITS = 1
 
 
 class ReadTransport(Protocol):
+    """A read-only byte stream; ``generation`` counts opens of the underlying link."""
+
+    generation: int
+
     async def read(self) -> bytes: ...
 
 
@@ -28,9 +33,14 @@ class SerialTransport:
     def __init__(self, reader: asyncio.StreamReader, transport: asyncio.Transport) -> None:
         self._reader = reader
         self._transport = transport
+        self.generation = 0
 
     @classmethod
     async def open(cls, bus: str) -> "SerialTransport":
+        if not (
+            bus.startswith("/dev/") and len(Path(bus).parts) >= 3 and ".." not in Path(bus).parts
+        ):
+            raise ValueError("serial bus must be an absolute /dev/... path")
         reader = asyncio.StreamReader()
         transport, _ = await serial_asyncio_fast.create_serial_connection(
             asyncio.get_running_loop(),
@@ -57,6 +67,7 @@ class TCPTransport:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._reader = reader
         self._writer = writer
+        self.generation = 0
 
     @classmethod
     async def open(cls, bus: str) -> "TCPTransport":
@@ -79,6 +90,7 @@ class SupervisedTransport:
         self._clock = clock
         self._transport: SerialTransport | TCPTransport | None = None
         self.state: BusState = "reconnecting"
+        self.generation = 0
         self._delay = RECONNECT_BACKOFF_MIN_S
         self._last_warning: float | None = None
 
@@ -106,6 +118,7 @@ class SupervisedTransport:
                         else:
                             self._transport = await SerialTransport.open(self._bus)
                     self.state = "connected"
+                    self.generation += 1
                 data = await self._read()
                 if not data:
                     raise ConnectionError("bus transport closed")

@@ -88,6 +88,23 @@ async def test_packs_keeps_original_readings_when_silent(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_packs_quarantines_all_blocks_after_fingerprint_mismatch(tmp_path: Path) -> None:
+    async with running_api(tmp_path) as (client, transport, _, clock):
+        transport.chunks.put_nowait(full_set())
+        await settle()
+        clock.advance(1)
+        # Replacement PIB/PIC can arrive before its identifying PIA.
+        transport.chunks.put_nowait(full_set()[len(pia()) :] + pia(cycles=1))
+        await settle()
+        packs = await (await client.get("/packs", headers=AUTH)).json()
+        assert packs["PACK"] == {
+            "link": "fingerprint_mismatch",
+            "last_seen": "1970-01-01T00:00:01.000Z",
+            "readings": {},
+        }
+
+
+@pytest.mark.asyncio
 async def test_websocket_matches_mqtt_bytes_and_filters(tmp_path: Path) -> None:
     async with (
         running_api(tmp_path) as (client, transport, sink, clock),
@@ -209,6 +226,40 @@ async def test_slow_client_is_closed_without_blocking_bridge(
             assert len([t for t, _, _ in sink.messages if t.endswith("/state")]) > before
             packs = await (await client.get("/packs", headers=AUTH)).json()
             assert packs["PACK"]["last_seen"] == "1970-01-01T00:00:10.000Z"
+
+
+@pytest.mark.asyncio
+async def test_websocket_discards_queued_readings_after_identity_revocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_send = web.WebSocketResponse.send_str
+    started, release = asyncio.Event(), asyncio.Event()
+    first = True
+
+    async def blocked_send(
+        ws: web.WebSocketResponse, data: str, compress: int | None = None
+    ) -> None:
+        nonlocal first
+        if first:
+            first = False
+            started.set()
+            await release.wait()
+        await original_send(ws, data, compress=compress)
+
+    monkeypatch.setattr(web.WebSocketResponse, "send_str", blocked_send)
+    async with (
+        running_api(tmp_path) as (client, transport, _, _),
+        client.ws_connect("/stream", headers=AUTH) as ws,
+    ):
+        transport.chunks.put_nowait(full_set())
+        await asyncio.wait_for(started.wait(), 1)
+        transport.chunks.put_nowait(pia(cycles=1))
+        await settle()
+        release.set()
+        # The send already in progress predates revocation; pending sends must be discarded.
+        assert (await ws.receive(timeout=1)).type == WSMsgType.TEXT
+        with pytest.raises(TimeoutError):
+            await ws.receive(timeout=0.02)
 
 
 def test_api_is_absent_without_token(tmp_path: Path) -> None:

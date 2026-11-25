@@ -15,7 +15,7 @@ from bms_flux.bridge import Bridge, probe_blocks
 from bms_flux.clock import Clock, SystemClock
 from bms_flux.mqtt import BrokerConnection, BrokerSink, ReconnectingSink
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
-from bms_flux.settings import load_settings
+from bms_flux.settings import Settings, load_settings
 from bms_flux.transport import SupervisedTransport
 
 
@@ -25,7 +25,7 @@ class ConfigurationError(Exception):
 
 async def run() -> None:
     try:
-        if addon.is_addon_mode():
+        if await asyncio.to_thread(addon.is_addon_mode):
             settings = await asyncio.to_thread(addon.load_addon_settings)
         else:
             settings = await asyncio.to_thread(load_settings)
@@ -35,6 +35,7 @@ async def run() -> None:
             for problem in error.errors(include_input=False, include_url=False)
         )
         raise ConfigurationError(f"invalid configuration:\n{problems}") from None
+    logging.getLogger().setLevel(settings.log_level.upper())
     mqtt = settings.mqtt
 
     @asynccontextmanager
@@ -81,6 +82,10 @@ async def run() -> None:
 
 
 async def probe(bus: str, seconds: int = 10, *, clock: Clock | None = None) -> None:
+    try:
+        bus = Settings.valid_bus(bus)
+    except ValueError as error:
+        raise ConfigurationError(str(error)) from None
     clock = clock or SystemClock()
     transport = SupervisedTransport(bus, clock)
     try:

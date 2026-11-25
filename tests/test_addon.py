@@ -2,6 +2,8 @@
 
 import io
 import json
+import re
+import tomllib
 import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,6 +17,9 @@ from pydantic_core import PydanticUndefined
 from bms_flux import addon
 from bms_flux.settings import (
     DAEMON_ONLY_KEYS,
+    DriftDivergence,
+    DriftFullCharge,
+    DriftRestedOCV,
     MQTTSettings,
     OCVPoint,
     Pack,
@@ -79,6 +84,42 @@ def _settings_keys_and_defaults() -> tuple[set[str], dict[str, Any]]:
         else:
             defaults[name] = value
     return keys, defaults
+
+
+DRIFT_GROUP_MODELS: dict[str, type[BaseModel]] = {
+    "drift_divergence": DriftDivergence,
+    "drift_full_charge": DriftFullCharge,
+    "drift_rested_ocv": DriftRestedOCV,
+}
+
+
+def _schema_bounds(schema: dict[str, Any]) -> dict[str, tuple[float, float]]:
+    """The (low, high) pair of every int(a,b) / float(a,b) add-on schema bound."""
+    pattern = r"(?:int|float)\((-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)\)"
+    bounds: dict[str, tuple[float, float]] = {}
+    for key, value in schema.items():
+        if isinstance(value, dict):
+            for subkey, subvalue in value.items():
+                found = re.fullmatch(pattern, str(subvalue))
+                if found:
+                    bounds[f"{key}.{subkey}"] = (float(found.group(1)), float(found.group(2)))
+    return bounds
+
+
+def _model_bounds() -> dict[str, tuple[float, float]]:
+    """The (low, high) pair of every bounded field in the drift settings groups."""
+    bounds: dict[str, tuple[float, float]] = {}
+    for group, model in DRIFT_GROUP_MODELS.items():
+        properties = model.model_json_schema()["properties"]
+        for name, spec in properties.items():
+            if "minimum" in spec and "maximum" in spec:
+                bounds[f"{group}.{name}"] = (spec["minimum"], spec["maximum"])
+    return bounds
+
+
+def test_addon_schema_bounds_match_the_settings_model() -> None:
+    config = yaml.safe_load(Path("bms_flux_addon/config.yaml").read_text())
+    assert _schema_bounds(config["schema"]) == _model_bounds()
 
 
 def test_addon_options_sync_with_settings_model() -> None:
@@ -258,3 +299,27 @@ def test_init_kwargs_override_env_and_files(
     assert settings.mqtt.host == "init"
     assert settings.state_dir == Path("/data")
     assert settings.api_port == 8765
+
+
+def test_compose_build_context_contains_every_copy_source() -> None:
+    compose = yaml.safe_load(Path("compose.yaml").read_text())
+    build = compose["services"]["bms-flux"]["build"]
+    context = Path(build["context"])
+    dockerfile = context / build["dockerfile"]
+    assert dockerfile.is_file()
+    for line in dockerfile.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("COPY "):
+            source = line.split()[1]
+            assert (context / source).is_file(), f"COPY source {source} missing from {context}"
+
+
+def test_packaging_versions_agree_on_one_release_number() -> None:
+    config = yaml.safe_load(Path("bms_flux_addon/config.yaml").read_text())
+    version = config["version"]
+    with Path("pyproject.toml").open("rb") as source:
+        pyproject = tomllib.load(source)
+    assert pyproject["project"]["version"] == version
+    compose = yaml.safe_load(Path("compose.yaml").read_text())
+    build_arg = compose["services"]["bms-flux"]["build"]["args"]["BUILD_VERSION"]
+    assert build_arg == f"${{BMS_FLUX_VERSION:-{version}}}"

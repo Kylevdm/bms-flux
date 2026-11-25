@@ -18,7 +18,7 @@ from aiohttp import web
 
 from bms_flux.identity import PackIdentity
 from bms_flux.readings import ReadingStream
-from bms_flux.stream import format_raw_frame, format_reading
+from bms_flux.stream import _iso_ts, format_raw_frame, format_reading
 
 
 @dataclass(eq=False)
@@ -27,7 +27,7 @@ class _Client:
     serials: set[str]
     blocks: set[str]
     raw: bool
-    queue: asyncio.Queue[str]
+    queue: asyncio.Queue[tuple[str | None, str]]
     overflow: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -57,7 +57,11 @@ class LocalAPI:
             readings = {r.block: format_reading(r) for r in self._identity.readings(serial)}
             result[serial] = {
                 "link": link,
-                "last_seen": max((r["ts"] for r in readings.values()), default=None),
+                "last_seen": (
+                    _iso_ts(last_seen)
+                    if (last_seen := self._identity.last_seen[serial]) is not None
+                    else None
+                ),
                 "readings": readings,
             }
         return web.json_response(result)
@@ -66,10 +70,13 @@ class LocalAPI:
         """Fan out without awaiting any WebSocket client."""
         while True:
             reading = await stream.get()
+            # One turn per reading: a producer burst must not overflow the bounded
+            # queue of a client whose sender is actively draining it.
+            await asyncio.sleep(0)
             self._offer(format_reading(reading))
             stream.task_done()
 
-    def publish_raw(self, frame: bytes, ts: float) -> None:
+    async def publish_raw(self, frame: bytes, ts: float) -> None:
         """Offer a CRC-valid raw frame without waiting for clients."""
         if self._raw_frames:
             self._offer(format_raw_frame(frame[0], frame, ts))
@@ -86,7 +93,7 @@ class LocalAPI:
             if not raw and client.blocks and payload["block"] not in client.blocks:
                 continue
             try:
-                client.queue.put_nowait(text)
+                client.queue.put_nowait((None if raw else serial, text))
             except asyncio.QueueFull:
                 client.overflow.set()
 
@@ -109,7 +116,10 @@ class LocalAPI:
 
         async def send() -> None:
             while True:
-                await ws.send_str(await client.queue.get())
+                serial, text = await client.queue.get()
+                # Only a fingerprint mismatch quarantines a serial; silence does not.
+                if serial is None or self._identity.links[serial] != "fingerprint_mismatch":
+                    await ws.send_str(text)
 
         async def receive() -> None:
             async for _ in ws:

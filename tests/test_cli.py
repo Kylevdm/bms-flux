@@ -1,6 +1,7 @@
 """Console wiring uses retained bridge availability and a retained offline LWT."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import TracebackType
@@ -195,3 +196,53 @@ def test_probe_command_defaults_to_ten_seconds(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr("sys.argv", ["bms-flux", "probe", "--bus", "/dev/test"])
     main()
     assert calls == [("/dev/test", 10)]
+
+
+@pytest.mark.asyncio
+async def test_run_applies_the_configured_log_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = Settings(
+        bus="/dev/test",
+        log_level="warning",
+        packs=[Pack(address=1, serial="PACK")],
+        mqtt=MQTTSettings(host="localhost"),
+        state_dir=tmp_path,
+    )
+    root = logging.getLogger()
+    previous = root.level
+
+    class Client:
+        async def __aenter__(self) -> "Client":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def publish(
+            self, topic: str, payload: str, *, retain: bool = False, qos: int = 0
+        ) -> None:
+            pass
+
+    class Transport(FakeTransport):
+        def close(self) -> None:
+            pass
+
+    async def open_transport(bus: str) -> Transport:
+        return Transport()
+
+    monkeypatch.setattr("bms_flux.cli.load_settings", lambda: settings)
+    monkeypatch.setattr("bms_flux.cli.aiomqtt.Client", lambda **kwargs: Client())
+    monkeypatch.setattr("bms_flux.transport.SerialTransport.open", staticmethod(open_transport))
+    task = asyncio.create_task(run())
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.001)
+            if root.level == logging.WARNING:
+                break
+        assert root.level == logging.WARNING
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        root.setLevel(previous)

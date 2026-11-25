@@ -10,6 +10,7 @@ import pytest
 from bms_flux.bridge import Bridge
 from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
 from bms_flux.settings import DriftDivergence, Pack
+from bms_flux.transport import BusState
 from tests.helpers import FakeTransport, ManualClock, MemoryMQTT, block, settle
 
 
@@ -226,5 +227,45 @@ async def test_broker_reconnect_resets_the_divergence_hold(tmp_path: Path) -> No
         # The hold restarts from the reconnect, so 20 more minutes is not enough.
         await play(transport, clock, 20 * 60, 700, 500)
         assert states(sink)[-1]["active"] is False
+    finally:
+        await cleanup(transport, task)
+
+
+@pytest.mark.asyncio
+async def test_transport_disconnect_resets_the_divergence_hold(tmp_path: Path) -> None:
+    bus: dict[str, BusState] = {"state": "connected"}
+    transport, sink, clock = FakeTransport(), MemoryMQTT(), ManualClock()
+    bridge = Bridge(
+        transport,
+        SeplosV3Decoder(),
+        sink,
+        [Pack(address=1, serial="A"), Pack(address=2, serial="B")],
+        clock,
+        snapshot_interval_s=10,
+        silent_after_s=20,
+        drift_divergence=DriftDivergence(hold_min=1),
+        state_dir=tmp_path,
+        bus_state=lambda: bus["state"],
+    )
+    task = asyncio.create_task(bridge.run())
+    try:
+        await settle()
+        await play(transport, clock, 30, 300, 400)
+        first_start = states(sink)[-1]["hold_start"]
+        assert first_start is not None
+
+        # An outage shorter than silent_after keeps every pack fresh, so only the
+        # transport event itself can reset the hold: a transport gap is a gap.
+        bus["state"] = "reconnecting"
+        clock.advance(5)
+        await settle()
+        bus["state"] = "connected"
+        await play(transport, clock, 30, 300, 400)
+        # Sixty minutes of spread since the first reading, but only thirty since
+        # the reconnect: the finding must not be active yet.
+        assert states(sink)[-1]["active"] is False
+        await play(transport, clock, 30, 300, 400)
+        assert states(sink)[-1]["active"] is True
+        assert states(sink)[-1]["hold_start"] != first_start
     finally:
         await cleanup(transport, task)

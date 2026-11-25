@@ -24,7 +24,7 @@ bms-flux listens passively to a bank of Seplos BMS packs on RS485 and publishes 
 | `drift_rested_ocv` | Pack-level anchor finding based on rested open-circuit voltage. |
 | `ocv_table` | Optional override of the built-in LFP OCV-to-SoC table. Empty means use the CALCE A123 midpoint table. |
 
-The local API always listens on port `8765` inside the container. Map it to a host port only if a LAN app needs it.
+The local API starts only when `api_token` is set; it then listens on port `8765` inside the container. Map it to a host port only if a LAN app needs it.
 
 ## State
 
@@ -32,9 +32,14 @@ Add-on state is stored in `/data`.
 
 ## Release procedure
 
-1. Update `bms_flux_addon/config.yaml` `version` and add an entry to `bms_flux_addon/CHANGELOG.md`.
-2. Commit the bump.
-3. Tag the commit `vX.Y.Z` and push the branch and the tag.
-4. Open/merge the PR to `main`.
+1. Bump the version in **every** place it is recorded:
+   - `bms_flux_addon/config.yaml` `version`
+   - `pyproject.toml` `project.version`
+   - the `BMS_FLUX_VERSION` fallback in `compose.yaml` (compose builders can
+     also pass the tag with `BMS_FLUX_VERSION` in the environment)
+2. Add an entry to `bms_flux_addon/CHANGELOG.md`.
+3. Commit the bump.
+4. Tag the commit `vX.Y.Z` and push the branch and the tag.
+5. Open/merge the PR to `main`.
 
-The `BUILD_VERSION` argument passed to the Dockerfile must equal the pushed `vX.Y.Z` tag, because the image installs the package from that tag.
+The `BUILD_VERSION` argument passed to the Dockerfile must equal the pushed `vX.Y.Z` tag, because the image installs the package from that tag. The Supervisor passes the add-on version automatically; a packaging test keeps the recorded versions in agreement.

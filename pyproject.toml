@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bms-flux"
-version = "0.0.0"
+version = "0.1.0"
 description = "Read-only bridge from a bank of Seplos packs on RS485 to Home Assistant over MQTT"
 license = "MIT"
 requires-python = ">=3.11"
