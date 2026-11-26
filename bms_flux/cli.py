@@ -1,0 +1,121 @@
+"""Run the bms-flux serial-to-MQTT bridge from the console script."""
+
+import argparse
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
+
+import aiomqtt
+from aiohttp import web
+from pydantic import ValidationError
+
+from bms_flux import addon
+from bms_flux.bridge import Bridge, probe_blocks
+from bms_flux.clock import Clock, SystemClock
+from bms_flux.mqtt import BrokerConnection, BrokerSink, ReconnectingSink
+from bms_flux.protocol.seplos_v3 import SeplosV3Decoder
+from bms_flux.settings import Settings, load_settings
+from bms_flux.transport import SupervisedTransport
+
+
+class ConfigurationError(Exception):
+    """A configuration failure safe to report without including secret input."""
+
+
+async def run() -> None:
+    try:
+        if await asyncio.to_thread(addon.is_addon_mode):
+            settings = await asyncio.to_thread(addon.load_addon_settings)
+        else:
+            settings = await asyncio.to_thread(load_settings)
+    except ValidationError as error:
+        problems = "\n".join(
+            f"  {'.'.join(map(str, problem['loc']))}: {problem['msg']}"
+            for problem in error.errors(include_input=False, include_url=False)
+        )
+        raise ConfigurationError(f"invalid configuration:\n{problems}") from None
+    logging.getLogger().setLevel(settings.log_level.upper())
+    mqtt = settings.mqtt
+
+    @asynccontextmanager
+    async def connect() -> AsyncIterator[BrokerConnection]:
+        async with aiomqtt.Client(
+            hostname=mqtt.host,
+            port=mqtt.port,
+            username=mqtt.username,
+            password=mqtt.password.get_secret_value() if mqtt.password else None,
+            will=aiomqtt.Will("bms_flux/status", "offline", retain=True),
+        ) as client:
+            yield BrokerSink(client)
+
+    clock = SystemClock()
+    transport = SupervisedTransport(settings.bus, clock)
+    try:
+        bridge = Bridge(
+            transport,
+            SeplosV3Decoder(),
+            ReconnectingSink(connect, clock),
+            settings.packs,
+            clock,
+            snapshot_interval_s=settings.snapshot_interval_s,
+            silent_after_s=settings.silent_after_s,
+            drift_full_charge=settings.drift_full_charge,
+            drift_divergence=settings.drift_divergence,
+            drift_rested_ocv=settings.drift_rested_ocv,
+            ocv_table=settings.ocv_table,
+            state_dir=settings.state_dir,
+            stream=settings.stream,
+            raw_frames=settings.raw_frames,
+            api_token=settings.api_token.get_secret_value(),
+            bus_state=lambda: transport.state,
+        )
+        async with AsyncExitStack() as stack:
+            if bridge.api is not None:
+                runner = web.AppRunner(bridge.api.app, access_log=None)
+                await runner.setup()
+                stack.push_async_callback(runner.cleanup)
+                await web.TCPSite(runner, "0.0.0.0", settings.api_port).start()
+            await bridge.run()
+    finally:
+        transport.close()
+
+
+async def probe(bus: str, seconds: int = 10, *, clock: Clock | None = None) -> None:
+    try:
+        bus = Settings.valid_bus(bus)
+    except ValueError as error:
+        raise ConfigurationError(str(error)) from None
+    clock = clock or SystemClock()
+    transport = SupervisedTransport(bus, clock)
+    try:
+        heard = await probe_blocks(transport, SeplosV3Decoder(), clock, seconds)
+        for address, block in sorted(heard.items()):
+            cycles = block.fields.get("cycles", "unknown")
+            soc = block.fields.get("reported_soc")
+            reported_soc = "unknown" if soc is None else f"{soc}%"
+            print(f"bus address {address}: cycles={cycles}, reported SoC={reported_soc}")
+    finally:
+        transport.close()
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    parser = argparse.ArgumentParser(prog="bms-flux")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("run")
+    probe_parser = commands.add_parser(
+        "probe", help="listen for bus addresses without transmitting"
+    )
+    probe_parser.add_argument("--bus", required=True)
+    probe_parser.add_argument("--seconds", type=int, default=10)
+    args = parser.parse_args()
+    if args.command == "probe" and args.seconds <= 0:
+        parser.error("--seconds must be positive")
+    with suppress(KeyboardInterrupt):
+        try:
+            asyncio.run(probe(args.bus, args.seconds) if args.command == "probe" else run())
+        except ConfigurationError as error:
+            parser.exit(2, f"bms-flux: {error}\n")
+        except Exception:
+            parser.exit(1, "bms-flux: unexpected core fault\n")
