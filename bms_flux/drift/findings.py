@@ -69,8 +69,12 @@ class FindingStore:
                         thresholds=finding["thresholds"],
                     )
             self._states = states
+        except FileNotFoundError:
+            # Normal until a rule first latches: the store writes only on a change.
+            _LOG.info("No saved findings yet; starting empty")
+            self._states = {}
         except (OSError, ValueError):
-            _LOG.warning("Finding state missing or corrupt; starting empty")
+            _LOG.warning("Finding state unreadable or corrupt; starting empty")
             self._states = {}
 
     def _save(self, snapshot: str) -> None:

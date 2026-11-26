@@ -1,6 +1,7 @@
 """Full-charge findings exercised through the bridge's byte-chunk seam."""
 
 import asyncio
+import logging
 import struct
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -226,4 +227,15 @@ async def test_corrupt_state_starts_empty_with_warning(
     (tmp_path / "findings.json").write_text('{"drift_full_charge": {"PACK": {"active": true}}}')
     async with running(tmp_path) as (_, _, sink, _):
         assert states(sink) == [{"active": False}]
-    assert "state missing or corrupt" in caplog.text
+    assert "state unreadable or corrupt" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_missing_state_starts_empty_without_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="bms_flux.drift.findings")
+    async with running(tmp_path) as (_, _, sink, _):
+        assert states(sink) == [{"active": False}]
+    assert "No saved findings yet" in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
