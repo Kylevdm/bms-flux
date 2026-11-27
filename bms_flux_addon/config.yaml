@@ -1,6 +1,6 @@
 ---
 name: bms-flux
-version: "0.1.0"
+version: "0.1.1"
 slug: bms_flux_addon
 description: Read-only bridge from a bank of Seplos packs on RS485 to Home Assistant over MQTT
 url: https://github.com/Kylevdm/bms-flux

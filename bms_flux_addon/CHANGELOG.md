@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- A missing drift finding file on start is now logged at info ("No saved findings yet") instead of warning as if saved state were corrupt. Unreadable or corrupt state still warns.
+
 ## 0.1.0
 
 Initial add-on release for bms-flux V1.
